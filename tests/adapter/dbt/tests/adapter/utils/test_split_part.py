@@ -1,13 +1,13 @@
 import pytest
-from tests.functional.cross_db_utils.base_cross_db_macro import BaseCrossDbMacro
-from tests.functional.cross_db_utils.fixture_split_part import (
+from dbt.tests.adapter.utils.base_utils import BaseUtils
+from dbt.tests.adapter.utils.fixture_split_part import (
     seeds__data_split_part_csv,
     models__test_split_part_sql,
     models__test_split_part_yml,
 )
 
 
-class BaseSplitPart(BaseCrossDbMacro):
+class BaseSplitPart(BaseUtils):
     @pytest.fixture(scope="class")
     def seeds(self):
         return {"data_split_part.csv": seeds__data_split_part_csv}
@@ -16,7 +16,7 @@ class BaseSplitPart(BaseCrossDbMacro):
     def models(self):
         return {
             "test_split_part.yml": models__test_split_part_yml,
-            "test_split_part.sql": models__test_split_part_sql,
+            "test_split_part.sql": self.interpolate_macro_namespace(models__test_split_part_sql, "split_part"),
         }
 
 

@@ -4,8 +4,8 @@
 # TODO how can we test this better?
 models__test_current_timestamp_sql = """
 select
-    {{ dbt_utils.current_timestamp() }} as actual,
-    {{ dbt_utils.current_timestamp() }} as expected
+    {{ current_timestamp() }} as actual,
+    {{ current_timestamp() }} as expected
 """
 
 

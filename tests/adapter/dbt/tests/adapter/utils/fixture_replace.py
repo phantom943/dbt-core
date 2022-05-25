@@ -22,7 +22,7 @@ with data as (
 
 select
 
-    {{ dbt_utils.replace('string_text', 'old_chars', 'new_chars') }} as actual,
+    {{ replace('string_text', 'old_chars', 'new_chars') }} as actual,
     result as expected
 
 from data

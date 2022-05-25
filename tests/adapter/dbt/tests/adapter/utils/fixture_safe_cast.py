@@ -16,7 +16,7 @@ with data as (
 )
 
 select
-    {{ dbt_utils.safe_cast('field', dbt_utils.type_string()) }} as actual,
+    {{ safe_cast('field', type_string()) }} as actual,
     output as expected
 
 from data

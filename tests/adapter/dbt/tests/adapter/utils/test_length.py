@@ -1,13 +1,13 @@
 import pytest
-from tests.functional.cross_db_utils.base_cross_db_macro import BaseCrossDbMacro
-from tests.functional.cross_db_utils.fixture_length import (
+from dbt.tests.adapter.utils.base_utils import BaseUtils
+from dbt.tests.adapter.utils.fixture_length import (
     seeds__data_length_csv,
     models__test_length_sql,
     models__test_length_yml,
 )
 
 
-class BaseLength(BaseCrossDbMacro):
+class BaseLength(BaseUtils):
     @pytest.fixture(scope="class")
     def seeds(self):
         return {"data_length.csv": seeds__data_length_csv}
@@ -16,7 +16,7 @@ class BaseLength(BaseCrossDbMacro):
     def models(self):
         return {
             "test_length.yml": models__test_length_yml,
-            "test_length.sql": models__test_length_sql,
+            "test_length.sql": self.interpolate_macro_namespace(models__test_length_sql, "length"),
         }
 
 

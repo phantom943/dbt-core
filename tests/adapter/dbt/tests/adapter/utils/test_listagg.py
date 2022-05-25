@@ -1,6 +1,6 @@
 import pytest
-from tests.functional.cross_db_utils.base_cross_db_macro import BaseCrossDbMacro
-from tests.functional.cross_db_utils.fixture_listagg import (
+from dbt.tests.adapter.utils.base_utils import BaseUtils
+from dbt.tests.adapter.utils.fixture_listagg import (
     seeds__data_listagg_csv,
     seeds__data_listagg_output_csv,
     models__test_listagg_sql,
@@ -8,7 +8,7 @@ from tests.functional.cross_db_utils.fixture_listagg import (
 )
 
 
-class BaseListagg(BaseCrossDbMacro):
+class BaseListagg(BaseUtils):
     @pytest.fixture(scope="class")
     def seeds(self):
         return {
@@ -20,7 +20,7 @@ class BaseListagg(BaseCrossDbMacro):
     def models(self):
         return {
             "test_listagg.yml": models__test_listagg_yml,
-            "test_listagg.sql": models__test_listagg_sql,
+            "test_listagg.sql": self.interpolate_macro_namespace(models__test_listagg_sql, "listagg"),
         }
 
 

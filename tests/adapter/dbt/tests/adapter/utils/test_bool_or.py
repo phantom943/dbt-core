@@ -1,6 +1,6 @@
 import pytest
-from tests.functional.cross_db_utils.base_cross_db_macro import BaseCrossDbMacro
-from tests.functional.cross_db_utils.fixture_bool_or import (
+from dbt.tests.adapter.utils.base_utils import BaseUtils
+from dbt.tests.adapter.utils.fixture_bool_or import (
     seeds__data_bool_or_csv,
     seeds__data_bool_or_expected_csv,
     models__test_bool_or_sql,
@@ -8,7 +8,7 @@ from tests.functional.cross_db_utils.fixture_bool_or import (
 )
 
 
-class BaseBoolOr(BaseCrossDbMacro):
+class BaseBoolOr(BaseUtils):
     @pytest.fixture(scope="class")
     def seeds(self):
         return {
@@ -20,7 +20,7 @@ class BaseBoolOr(BaseCrossDbMacro):
     def models(self):
         return {
             "test_bool_or.yml": models__test_bool_or_yml,
-            "test_bool_or.sql": models__test_bool_or_sql,
+            "test_bool_or.sql": self.interpolate_macro_namespace(models__test_bool_or_sql, "bool_or"),
         }
 
 

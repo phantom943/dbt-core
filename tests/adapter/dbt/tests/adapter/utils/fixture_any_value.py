@@ -34,7 +34,7 @@ data_output as (
 calculate as (
     select
         key_name,
-        {{ dbt_utils.any_value('static_col') }} as static_col,
+        {{ any_value('static_col') }} as static_col,
         count(id) as num_rows
     from data
     group by key_name

@@ -18,7 +18,7 @@ with data as (
 )
 
 select
-    {{ dbt_utils.concat(['input_1', 'input_2']) }} as actual,
+    {{ concat(['input_1', 'input_2']) }} as actual,
     output as expected
 
 from data

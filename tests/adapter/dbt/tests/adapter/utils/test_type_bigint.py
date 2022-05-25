@@ -1,13 +1,13 @@
 import pytest
-from tests.functional.cross_db_utils.base_cross_db_macro import BaseCrossDbMacro
-from tests.functional.cross_db_utils.fixture_type_bigint import (
+from dbt.tests.adapter.utils.base_utils import BaseUtils
+from dbt.tests.adapter.utils.fixture_type_bigint import (
     seeds__data_type_bigint_csv,
     models__test_type_bigint_sql,
     models__test_type_bigint_yml,
 )
 
 
-class BaseTypeBigint(BaseCrossDbMacro):
+class BaseTypeBigint(BaseUtils):
     @pytest.fixture(scope="class")
     def seeds(self):
         return {"data_type_bigint.csv": seeds__data_type_bigint_csv}
@@ -16,7 +16,7 @@ class BaseTypeBigint(BaseCrossDbMacro):
     def models(self):
         return {
             "test_type_bigint.yml": models__test_type_bigint_yml,
-            "test_type_bigint.sql": models__test_type_bigint_sql,
+            "test_type_bigint.sql": self.interpolate_macro_namespace(models__test_type_bigint_sql, "type_bigint"),
         }
 
 

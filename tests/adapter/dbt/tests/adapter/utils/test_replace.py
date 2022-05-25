@@ -1,13 +1,13 @@
 import pytest
-from tests.functional.cross_db_utils.base_cross_db_macro import BaseCrossDbMacro
-from tests.functional.cross_db_utils.fixture_replace import (
+from dbt.tests.adapter.utils.base_utils import BaseUtils
+from dbt.tests.adapter.utils.fixture_replace import (
     seeds__data_replace_csv,
     models__test_replace_sql,
     models__test_replace_yml,
 )
 
 
-class BaseReplace(BaseCrossDbMacro):
+class BaseReplace(BaseUtils):
     @pytest.fixture(scope="class")
     def seeds(self):
         return {"data_replace.csv": seeds__data_replace_csv}
@@ -16,7 +16,7 @@ class BaseReplace(BaseCrossDbMacro):
     def models(self):
         return {
             "test_replace.yml": models__test_replace_yml,
-            "test_replace.sql": models__test_replace_sql,
+            "test_replace.sql": self.interpolate_macro_namespace(models__test_replace_sql, "replace"),
         }
 
 

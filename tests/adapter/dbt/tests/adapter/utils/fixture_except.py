@@ -30,36 +30,36 @@ where 0=1
 
 models__test_except_a_minus_b_sql = """
 select * from {{ ref('data_except_a') }}
-{{ dbt_utils.except() }}
+{{ except() }}
 select * from {{ ref('data_except_b') }}
 """
 
 models__test_except_b_minus_a_sql = """
 select * from {{ ref('data_except_b') }}
-{{ dbt_utils.except() }}
+{{ except() }}
 select * from {{ ref('data_except_a') }}
 """
 
 models__test_except_a_minus_a_sql = """
 select * from {{ ref('data_except_a') }}
-{{ dbt_utils.except() }}
+{{ except() }}
 select * from {{ ref('data_except_a') }}
 """
 
 models__test_except_a_minus_empty_sql = """
 select * from {{ ref('data_except_a') }}
-{{ dbt_utils.except() }}
+{{ except() }}
 select * from {{ ref('data_except_empty') }}
 """
 
 models__test_except_empty_minus_a_sql = """
 select * from {{ ref('data_except_empty') }}
-{{ dbt_utils.except() }}
+{{ except() }}
 select * from {{ ref('data_except_a') }}
 """
 
 models__test_except_empty_minus_empty_sql = """
 select * from {{ ref('data_except_empty') }}
-{{ dbt_utils.except() }}
+{{ except() }}
 select * from {{ ref('data_except_empty') }}
 """

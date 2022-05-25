@@ -1,13 +1,13 @@
 import pytest
-from tests.functional.cross_db_utils.base_cross_db_macro import BaseCrossDbMacro
-from tests.functional.cross_db_utils.fixture_type_boolean import (
+from dbt.tests.adapter.utils.base_utils import BaseUtils
+from dbt.tests.adapter.utils.fixture_type_boolean import (
     seeds__data_type_boolean_csv,
     models__test_type_boolean_sql,
     models__test_type_boolean_yml,
 )
 
 
-class BaseTypeBoolean(BaseCrossDbMacro):
+class BaseTypeBoolean(BaseUtils):
     @pytest.fixture(scope="class")
     def seeds(self):
         return {"data_type_boolean.csv": seeds__data_type_boolean_csv}
@@ -16,7 +16,7 @@ class BaseTypeBoolean(BaseCrossDbMacro):
     def models(self):
         return {
             "test_type_boolean.yml": models__test_type_boolean_yml,
-            "test_type_boolean.sql": models__test_type_boolean_sql,
+            "test_type_boolean.sql": self.interpolate_macro_namespace(models__test_type_boolean_sql, "type_boolean"),
         }
 
 

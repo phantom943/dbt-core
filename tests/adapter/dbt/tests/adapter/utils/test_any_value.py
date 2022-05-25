@@ -1,6 +1,6 @@
 import pytest
-from tests.functional.cross_db_utils.base_cross_db_macro import BaseCrossDbMacro
-from tests.functional.cross_db_utils.fixture_any_value import (
+from dbt.tests.adapter.utils.base_utils import BaseUtils
+from dbt.tests.adapter.utils.fixture_any_value import (
     seeds__data_any_value_csv,
     seeds__data_any_value_expected_csv,
     models__test_any_value_sql,
@@ -8,7 +8,7 @@ from tests.functional.cross_db_utils.fixture_any_value import (
 )
 
 
-class BaseAnyValue(BaseCrossDbMacro):
+class BaseAnyValue(BaseUtils):
     @pytest.fixture(scope="class")
     def seeds(self):
         return {
@@ -20,7 +20,7 @@ class BaseAnyValue(BaseCrossDbMacro):
     def models(self):
         return {
             "test_any_value.yml": models__test_any_value_yml,
-            "test_any_value.sql": models__test_any_value_sql,
+            "test_any_value.sql": self.interpolate_macro_namespace(models__test_any_value_sql, "any_value"),
         }
 
 

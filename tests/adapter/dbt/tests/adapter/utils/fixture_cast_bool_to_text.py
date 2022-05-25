@@ -12,7 +12,7 @@ with data as (
 
 select
 
-    {{ dbt_utils.cast_bool_to_text("input") }} as actual,
+    {{ cast_bool_to_text("input") }} as actual,
     expected
 
 from data

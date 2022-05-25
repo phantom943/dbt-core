@@ -1,13 +1,13 @@
 import pytest
-from tests.functional.cross_db_utils.base_cross_db_macro import BaseCrossDbMacro
-from tests.functional.cross_db_utils.fixture_type_float import (
+from dbt.tests.adapter.utils.base_utils import BaseUtils
+from dbt.tests.adapter.utils.fixture_type_float import (
     seeds__data_type_float_csv,
     models__test_type_float_sql,
     models__test_type_float_yml,
 )
 
 
-class BaseTypeFloat(BaseCrossDbMacro):
+class BaseTypeFloat(BaseUtils):
     @pytest.fixture(scope="class")
     def seeds(self):
         return {"data_type_float.csv": seeds__data_type_float_csv}
@@ -16,7 +16,7 @@ class BaseTypeFloat(BaseCrossDbMacro):
     def models(self):
         return {
             "test_type_float.yml": models__test_type_float_yml,
-            "test_type_float.sql": models__test_type_float_sql,
+            "test_type_float.sql": self.interpolate_macro_namespace(models__test_type_float_sql, "type_float"),
         }
 
 

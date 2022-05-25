@@ -3,7 +3,7 @@
 {%- endmacro %}
 
 {% macro default__current_timestamp() %}
-    current_timestamp::{{dbt_utils.type_timestamp()}}
+    current_timestamp::{{dbt.type_timestamp()}}
 {% endmacro %}
 
 {% macro current_timestamp_in_utc() -%}
@@ -11,5 +11,5 @@
 {%- endmacro %}
 
 {% macro default__current_timestamp_in_utc() %}
-    {{dbt_utils.current_timestamp()}}
+    {{dbt.current_timestamp()}}
 {% endmacro %}

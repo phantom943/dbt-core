@@ -2,10 +2,10 @@
 # string_literal
 
 models__test_string_literal_sql = """
-select {{ dbt_utils.string_literal("abc") }} as actual, 'abc' as expected union all
-select {{ dbt_utils.string_literal("1") }} as actual, '1' as expected union all
-select {{ dbt_utils.string_literal("") }} as actual, '' as expected union all
-select {{ dbt_utils.string_literal(none) }} as actual, 'None' as expected
+select {{ string_literal("abc") }} as actual, 'abc' as expected union all
+select {{ string_literal("1") }} as actual, '1' as expected union all
+select {{ string_literal("") }} as actual, '' as expected union all
+select {{ string_literal(none) }} as actual, 'None' as expected
 """
 
 

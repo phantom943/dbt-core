@@ -1,7 +1,7 @@
 import pytest
 from dbt.tests.util import run_dbt, check_relations_equal
-from tests.functional.cross_db_utils.base_cross_db_macro import BaseCrossDbMacro
-from tests.functional.cross_db_utils.fixture_except import (
+from dbt.tests.adapter.utils.base_utils import BaseUtils
+from dbt.tests.adapter.utils.fixture_except import (
     seeds__data_except_a_csv,
     seeds__data_except_b_csv,
     seeds__data_except_a_minus_b_csv,
@@ -16,7 +16,7 @@ from tests.functional.cross_db_utils.fixture_except import (
 )
 
 
-class BaseExcept(BaseCrossDbMacro):
+class BaseExcept(BaseUtils):
     @pytest.fixture(scope="class")
     def seeds(self):
         return {
@@ -29,13 +29,13 @@ class BaseExcept(BaseCrossDbMacro):
     @pytest.fixture(scope="class")
     def models(self):
         return {
-            "data_except_empty.sql": models__data_except_empty_sql,
-            "test_except_a_minus_b.sql": models__test_except_a_minus_b_sql,
-            "test_except_b_minus_a.sql": models__test_except_b_minus_a_sql,
-            "test_except_a_minus_a.sql": models__test_except_a_minus_a_sql,
-            "test_except_a_minus_empty.sql": models__test_except_a_minus_empty_sql,
-            "test_except_empty_minus_a.sql": models__test_except_empty_minus_a_sql,
-            "test_except_empty_minus_empty.sql": models__test_except_empty_minus_empty_sql,
+            "data_except_empty.sql": self.interpolate_macro_namespace(models__data_except_empty_sql, "except"),
+            "test_except_a_minus_b.sql": self.interpolate_macro_namespace(models__test_except_a_minus_b_sql, "except"),
+            "test_except_b_minus_a.sql": self.interpolate_macro_namespace(models__test_except_b_minus_a_sql, "except"),
+            "test_except_a_minus_a.sql": self.interpolate_macro_namespace(models__test_except_a_minus_a_sql, "except"),
+            "test_except_a_minus_empty.sql": self.interpolate_macro_namespace(models__test_except_a_minus_empty_sql, "except"),
+            "test_except_empty_minus_a.sql": self.interpolate_macro_namespace(models__test_except_empty_minus_a_sql, "except"),
+            "test_except_empty_minus_empty.sql": self.interpolate_macro_namespace(models__test_except_empty_minus_empty_sql, "except"),
         }
 
     def test_build_assert_equal(self, project):

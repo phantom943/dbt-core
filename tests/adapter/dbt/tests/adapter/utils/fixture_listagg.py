@@ -44,7 +44,7 @@ calculate as (
 
     select
         group_col,
-        {{ dbt_utils.listagg('string_text', "'_|_'", "order by order_col") }} as actual,
+        {{ listagg('string_text', "'_|_'", "order by order_col") }} as actual,
         'bottom_ordered' as version
     from data
     group by group_col
@@ -53,7 +53,7 @@ calculate as (
 
     select
         group_col,
-        {{ dbt_utils.listagg('string_text', "'_|_'", "order by order_col", 2) }} as actual,
+        {{ listagg('string_text', "'_|_'", "order by order_col", 2) }} as actual,
         'bottom_ordered_limited' as version
     from data
     group by group_col
@@ -62,7 +62,7 @@ calculate as (
 
     select
         group_col,
-        {{ dbt_utils.listagg('string_text', "', '") }} as actual,
+        {{ listagg('string_text', "', '") }} as actual,
         'comma_whitespace_unordered' as version
     from data
     where group_col = 3
@@ -72,7 +72,7 @@ calculate as (
 
     select
         group_col,
-        {{ dbt_utils.listagg('DISTINCT string_text', "','") }} as actual,
+        {{ listagg('DISTINCT string_text', "','") }} as actual,
         'distinct_comma' as version
     from data
     where group_col = 3
@@ -82,7 +82,7 @@ calculate as (
 
     select
         group_col,
-        {{ dbt_utils.listagg('string_text') }} as actual,
+        {{ listagg('string_text') }} as actual,
         'no_params' as version
     from data
     where group_col = 3

@@ -37,7 +37,7 @@ calculate as (
 
     select
         key,
-        {{ dbt_utils.bool_or('val1 = val2') }} as value
+        {{ bool_or('val1 = val2') }} as value
     from data
     group by key
 

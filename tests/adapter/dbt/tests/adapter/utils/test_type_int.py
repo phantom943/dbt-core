@@ -1,13 +1,13 @@
 import pytest
-from tests.functional.cross_db_utils.base_cross_db_macro import BaseCrossDbMacro
-from tests.functional.cross_db_utils.fixture_type_int import (
+from dbt.tests.adapter.utils.base_utils import BaseUtils
+from dbt.tests.adapter.utils.fixture_type_int import (
     seeds__data_type_int_csv,
     models__test_type_int_sql,
     models__test_type_int_yml,
 )
 
 
-class BaseTypeInt(BaseCrossDbMacro):
+class BaseTypeInt(BaseUtils):
     @pytest.fixture(scope="class")
     def seeds(self):
         return {"data_type_int.csv": seeds__data_type_int_csv}
@@ -16,7 +16,7 @@ class BaseTypeInt(BaseCrossDbMacro):
     def models(self):
         return {
             "test_type_int.yml": models__test_type_int_yml,
-            "test_type_int.sql": models__test_type_int_sql,
+            "test_type_int.sql": self.interpolate_macro_namespace(models__test_type_int_sql, "type_int"),
         }
 
 

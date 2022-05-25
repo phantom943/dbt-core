@@ -17,7 +17,7 @@ with data as (
 )
 
 select
-    {{ dbt_utils.hash('input_1') }} as actual,
+    {{ hash('input_1') }} as actual,
     output as expected
 
 from data
