@@ -32,7 +32,6 @@ class BaseDateAdd(BaseUtils):
 
     @pytest.fixture(scope="class")
     def models(self):
-        macro_namespace = self.macro_namespace()
         return {
             "test_dateadd.yml": models__test_dateadd_yml,
             "test_dateadd.sql": self.interpolate_macro_namespace(
