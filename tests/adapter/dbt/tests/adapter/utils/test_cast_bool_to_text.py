@@ -11,7 +11,9 @@ class BaseCastBoolToText(BaseUtils):
     def models(self):
         return {
             "test_cast_bool_to_text.yml": models__test_cast_bool_to_text_yml,
-            "test_cast_bool_to_text.sql": self.interpolate_macro_namespace(models__test_cast_bool_to_text_sql, "cast_bool_to_text"),
+            "test_cast_bool_to_text.sql": self.interpolate_macro_namespace(
+                models__test_cast_bool_to_text_sql, "cast_bool_to_text"
+            ),
         }
 
 

@@ -11,7 +11,9 @@ class BaseStringLiteral(BaseUtils):
     def models(self):
         return {
             "test_string_literal.yml": models__test_string_literal_yml,
-            "test_string_literal.sql": self.interpolate_macro_namespace(models__test_string_literal_sql, "string_literal"),
+            "test_string_literal.sql": self.interpolate_macro_namespace(
+                models__test_string_literal_sql, "string_literal"
+            ),
         }
 
 

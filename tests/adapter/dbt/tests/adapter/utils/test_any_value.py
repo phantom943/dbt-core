@@ -20,7 +20,9 @@ class BaseAnyValue(BaseUtils):
     def models(self):
         return {
             "test_any_value.yml": models__test_any_value_yml,
-            "test_any_value.sql": self.interpolate_macro_namespace(models__test_any_value_sql, "any_value"),
+            "test_any_value.sql": self.interpolate_macro_namespace(
+                models__test_any_value_sql, "any_value"
+            ),
         }
 
 

@@ -11,7 +11,9 @@ class BaseCurrentTimestamp(BaseUtils):
     def models(self):
         return {
             "test_current_timestamp.yml": models__test_current_timestamp_yml,
-            "test_current_timestamp.sql": self.interpolate_macro_namespace(models__test_current_timestamp_sql, "current_timestamp"),
+            "test_current_timestamp.sql": self.interpolate_macro_namespace(
+                models__test_current_timestamp_sql, "current_timestamp"
+            ),
         }
 
 

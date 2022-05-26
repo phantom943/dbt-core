@@ -16,7 +16,9 @@ class BaseReplace(BaseUtils):
     def models(self):
         return {
             "test_replace.yml": models__test_replace_yml,
-            "test_replace.sql": self.interpolate_macro_namespace(models__test_replace_sql, "replace"),
+            "test_replace.sql": self.interpolate_macro_namespace(
+                models__test_replace_sql, "replace"
+            ),
         }
 
 

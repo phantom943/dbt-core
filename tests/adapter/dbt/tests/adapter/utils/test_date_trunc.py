@@ -16,7 +16,9 @@ class BaseDateTrunc(BaseUtils):
     def models(self):
         return {
             "test_date_trunc.yml": models__test_date_trunc_yml,
-            "test_date_trunc.sql": self.interpolate_macro_namespace(models__test_date_trunc_sql, "date_trunc"),
+            "test_date_trunc.sql": self.interpolate_macro_namespace(
+                models__test_date_trunc_sql, "date_trunc"
+            ),
         }
 
 

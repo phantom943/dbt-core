@@ -16,7 +16,9 @@ class BaseTypeFloat(BaseUtils):
     def models(self):
         return {
             "test_type_float.yml": models__test_type_float_yml,
-            "test_type_float.sql": self.interpolate_macro_namespace(models__test_type_float_sql, "type_float"),
+            "test_type_float.sql": self.interpolate_macro_namespace(
+                models__test_type_float_sql, "type_float"
+            ),
         }
 
 

@@ -16,7 +16,9 @@ class BaseTypeBigint(BaseUtils):
     def models(self):
         return {
             "test_type_bigint.yml": models__test_type_bigint_yml,
-            "test_type_bigint.sql": self.interpolate_macro_namespace(models__test_type_bigint_sql, "type_bigint"),
+            "test_type_bigint.sql": self.interpolate_macro_namespace(
+                models__test_type_bigint_sql, "type_bigint"
+            ),
         }
 
 

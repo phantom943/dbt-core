@@ -16,7 +16,9 @@ class BasePosition(BaseUtils):
     def models(self):
         return {
             "test_position.yml": models__test_position_yml,
-            "test_position.sql": self.interpolate_macro_namespace(models__test_position_sql, "position"),
+            "test_position.sql": self.interpolate_macro_namespace(
+                models__test_position_sql, "position"
+            ),
         }
 
 

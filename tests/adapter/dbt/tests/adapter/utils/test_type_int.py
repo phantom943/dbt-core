@@ -16,7 +16,9 @@ class BaseTypeInt(BaseUtils):
     def models(self):
         return {
             "test_type_int.yml": models__test_type_int_yml,
-            "test_type_int.sql": self.interpolate_macro_namespace(models__test_type_int_sql, "type_int"),
+            "test_type_int.sql": self.interpolate_macro_namespace(
+                models__test_type_int_sql, "type_int"
+            ),
         }
 
 

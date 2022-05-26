@@ -16,7 +16,9 @@ class BaseLastDay(BaseUtils):
     def models(self):
         return {
             "test_last_day.yml": models__test_last_day_yml,
-            "test_last_day.sql": self.interpolate_macro_namespace(models__test_last_day_sql, "last_day"),
+            "test_last_day.sql": self.interpolate_macro_namespace(
+                models__test_last_day_sql, "last_day"
+            ),
         }
 
 

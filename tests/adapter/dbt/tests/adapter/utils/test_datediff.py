@@ -16,7 +16,9 @@ class BaseDateDiff(BaseUtils):
     def models(self):
         return {
             "test_datediff.yml": models__test_datediff_yml,
-            "test_datediff.sql": self.interpolate_macro_namespace(models__test_datediff_sql, "datediff"),
+            "test_datediff.sql": self.interpolate_macro_namespace(
+                models__test_datediff_sql, "datediff"
+            ),
         }
 
 

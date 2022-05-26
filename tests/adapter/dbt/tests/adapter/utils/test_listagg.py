@@ -20,7 +20,9 @@ class BaseListagg(BaseUtils):
     def models(self):
         return {
             "test_listagg.yml": models__test_listagg_yml,
-            "test_listagg.sql": self.interpolate_macro_namespace(models__test_listagg_sql, "listagg"),
+            "test_listagg.sql": self.interpolate_macro_namespace(
+                models__test_listagg_sql, "listagg"
+            ),
         }
 
 

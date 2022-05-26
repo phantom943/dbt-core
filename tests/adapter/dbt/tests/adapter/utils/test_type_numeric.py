@@ -16,7 +16,9 @@ class BaseTypeNumeric(BaseUtils):
     def models(self):
         return {
             "test_type_numeric.yml": models__test_type_numeric_yml,
-            "test_type_numeric.sql": self.interpolate_macro_namespace(models__test_type_numeric_sql, "type_numeric"),
+            "test_type_numeric.sql": self.interpolate_macro_namespace(
+                models__test_type_numeric_sql, "type_numeric"
+            ),
         }
 
 

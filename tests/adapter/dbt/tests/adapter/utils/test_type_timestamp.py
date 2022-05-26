@@ -16,7 +16,9 @@ class BaseTypeTimestamp(BaseUtils):
     def models(self):
         return {
             "test_type_timestamp.yml": models__test_type_timestamp_yml,
-            "test_type_timestamp.sql": self.interpolate_macro_namespace(models__test_type_timestamp_sql, "type_timestamp"),
+            "test_type_timestamp.sql": self.interpolate_macro_namespace(
+                models__test_type_timestamp_sql, "type_timestamp"
+            ),
         }
 
 

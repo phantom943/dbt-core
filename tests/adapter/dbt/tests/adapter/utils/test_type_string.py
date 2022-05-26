@@ -16,7 +16,9 @@ class BaseTypeString(BaseUtils):
     def models(self):
         return {
             "test_type_string.yml": models__test_type_string_yml,
-            "test_type_string.sql": self.interpolate_macro_namespace(models__test_type_string_sql, "type_string"),
+            "test_type_string.sql": self.interpolate_macro_namespace(
+                models__test_type_string_sql, "type_string"
+            ),
         }
 
 

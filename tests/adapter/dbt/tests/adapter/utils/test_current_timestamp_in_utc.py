@@ -11,7 +11,9 @@ class BaseCurrentTimestampInUtc(BaseUtils):
     def models(self):
         return {
             "test_current_timestamp_in_utc.yml": models__test_current_timestamp_in_utc_yml,
-            "test_current_timestamp_in_utc.sql": self.interpolate_macro_namespace(models__test_current_timestamp_in_utc_sql, "current_timestamp_in_utc"),
+            "test_current_timestamp_in_utc.sql": self.interpolate_macro_namespace(
+                models__test_current_timestamp_in_utc_sql, "current_timestamp_in_utc"
+            ),
         }
 
 

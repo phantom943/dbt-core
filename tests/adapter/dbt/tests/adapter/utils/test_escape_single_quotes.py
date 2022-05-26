@@ -12,7 +12,9 @@ class BaseEscapeSingleQuotesQuote(BaseUtils):
     def models(self):
         return {
             "test_escape_single_quotes.yml": models__test_escape_single_quotes_yml,
-            "test_escape_single_quotes.sql": self.interpolate_macro_namespace(models__test_escape_single_quotes_quote_sql, "escape_single_quotes"),
+            "test_escape_single_quotes.sql": self.interpolate_macro_namespace(
+                models__test_escape_single_quotes_quote_sql, "escape_single_quotes"
+            ),
         }
 
 
@@ -21,7 +23,9 @@ class BaseEscapeSingleQuotesBackslash(BaseUtils):
     def models(self):
         return {
             "test_escape_single_quotes.yml": models__test_escape_single_quotes_yml,
-            "test_escape_single_quotes.sql": self.interpolate_macro_namespace(models__test_escape_single_quotes_backslash_sql, "escape_single_quotes"),
+            "test_escape_single_quotes.sql": self.interpolate_macro_namespace(
+                models__test_escape_single_quotes_backslash_sql, "escape_single_quotes"
+            ),
         }
 
 

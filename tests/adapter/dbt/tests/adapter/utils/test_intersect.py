@@ -27,18 +27,32 @@ class BaseIntersect(BaseUtils):
     @pytest.fixture(scope="class")
     def models(self):
         return {
-            "data_intersect_empty.sql": self.interpolate_macro_namespace(models__data_intersect_empty_sql, "intersect"),
-            "test_intersect_a_overlap_b.sql": self.interpolate_macro_namespace(models__test_intersect_a_overlap_b_sql, "intersect"),
-            "test_intersect_b_overlap_a.sql": self.interpolate_macro_namespace(models__test_intersect_b_overlap_a_sql, "intersect"),
-            "test_intersect_a_overlap_a.sql": self.interpolate_macro_namespace(models__test_intersect_a_overlap_a_sql, "intersect"),
-            "test_intersect_a_overlap_empty.sql": self.interpolate_macro_namespace(models__test_intersect_a_overlap_empty_sql, "intersect"),
-            "test_intersect_empty_overlap_a.sql": self.interpolate_macro_namespace(models__test_intersect_empty_overlap_a_sql, "intersect"),
-            "test_intersect_empty_overlap_empty.sql": self.interpolate_macro_namespace(models__test_intersect_empty_overlap_empty_sql, "intersect"),
+            "data_intersect_empty.sql": self.interpolate_macro_namespace(
+                models__data_intersect_empty_sql, "intersect"
+            ),
+            "test_intersect_a_overlap_b.sql": self.interpolate_macro_namespace(
+                models__test_intersect_a_overlap_b_sql, "intersect"
+            ),
+            "test_intersect_b_overlap_a.sql": self.interpolate_macro_namespace(
+                models__test_intersect_b_overlap_a_sql, "intersect"
+            ),
+            "test_intersect_a_overlap_a.sql": self.interpolate_macro_namespace(
+                models__test_intersect_a_overlap_a_sql, "intersect"
+            ),
+            "test_intersect_a_overlap_empty.sql": self.interpolate_macro_namespace(
+                models__test_intersect_a_overlap_empty_sql, "intersect"
+            ),
+            "test_intersect_empty_overlap_a.sql": self.interpolate_macro_namespace(
+                models__test_intersect_empty_overlap_a_sql, "intersect"
+            ),
+            "test_intersect_empty_overlap_empty.sql": self.interpolate_macro_namespace(
+                models__test_intersect_empty_overlap_empty_sql, "intersect"
+            ),
         }
 
     def test_build_assert_equal(self, project):
-        run_dbt(['deps'])
-        run_dbt(['build'])
+        run_dbt(["deps"])
+        run_dbt(["build"])
 
         check_relations_equal(
             project.adapter,

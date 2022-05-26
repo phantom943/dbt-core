@@ -16,7 +16,9 @@ class BaseSplitPart(BaseUtils):
     def models(self):
         return {
             "test_split_part.yml": models__test_split_part_yml,
-            "test_split_part.sql": self.interpolate_macro_namespace(models__test_split_part_sql, "split_part"),
+            "test_split_part.sql": self.interpolate_macro_namespace(
+                models__test_split_part_sql, "split_part"
+            ),
         }
 
 

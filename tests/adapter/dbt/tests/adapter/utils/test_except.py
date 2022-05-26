@@ -29,18 +29,32 @@ class BaseExcept(BaseUtils):
     @pytest.fixture(scope="class")
     def models(self):
         return {
-            "data_except_empty.sql": self.interpolate_macro_namespace(models__data_except_empty_sql, "except"),
-            "test_except_a_minus_b.sql": self.interpolate_macro_namespace(models__test_except_a_minus_b_sql, "except"),
-            "test_except_b_minus_a.sql": self.interpolate_macro_namespace(models__test_except_b_minus_a_sql, "except"),
-            "test_except_a_minus_a.sql": self.interpolate_macro_namespace(models__test_except_a_minus_a_sql, "except"),
-            "test_except_a_minus_empty.sql": self.interpolate_macro_namespace(models__test_except_a_minus_empty_sql, "except"),
-            "test_except_empty_minus_a.sql": self.interpolate_macro_namespace(models__test_except_empty_minus_a_sql, "except"),
-            "test_except_empty_minus_empty.sql": self.interpolate_macro_namespace(models__test_except_empty_minus_empty_sql, "except"),
+            "data_except_empty.sql": self.interpolate_macro_namespace(
+                models__data_except_empty_sql, "except"
+            ),
+            "test_except_a_minus_b.sql": self.interpolate_macro_namespace(
+                models__test_except_a_minus_b_sql, "except"
+            ),
+            "test_except_b_minus_a.sql": self.interpolate_macro_namespace(
+                models__test_except_b_minus_a_sql, "except"
+            ),
+            "test_except_a_minus_a.sql": self.interpolate_macro_namespace(
+                models__test_except_a_minus_a_sql, "except"
+            ),
+            "test_except_a_minus_empty.sql": self.interpolate_macro_namespace(
+                models__test_except_a_minus_empty_sql, "except"
+            ),
+            "test_except_empty_minus_a.sql": self.interpolate_macro_namespace(
+                models__test_except_empty_minus_a_sql, "except"
+            ),
+            "test_except_empty_minus_empty.sql": self.interpolate_macro_namespace(
+                models__test_except_empty_minus_empty_sql, "except"
+            ),
         }
 
     def test_build_assert_equal(self, project):
-        run_dbt(['deps'])
-        run_dbt(['build'])
+        run_dbt(["deps"])
+        run_dbt(["build"])
 
         check_relations_equal(
             project.adapter,

@@ -16,7 +16,9 @@ class BaseTypeBoolean(BaseUtils):
     def models(self):
         return {
             "test_type_boolean.yml": models__test_type_boolean_yml,
-            "test_type_boolean.sql": self.interpolate_macro_namespace(models__test_type_boolean_sql, "type_boolean"),
+            "test_type_boolean.sql": self.interpolate_macro_namespace(
+                models__test_type_boolean_sql, "type_boolean"
+            ),
         }
 
 
