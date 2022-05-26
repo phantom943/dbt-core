@@ -1,5 +1,3 @@
-
-
 # type_string
 
 # TODO - implement expected results here

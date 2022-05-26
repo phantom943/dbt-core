@@ -1,4 +1,3 @@
-
 # current_timestamp_in_utc
 
 # TODO how can we test this better?

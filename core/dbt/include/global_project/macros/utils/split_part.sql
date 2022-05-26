@@ -17,7 +17,7 @@
     split_part(
         {{ string_text }},
         {{ delimiter_text }},
-          length({{ string_text }}) 
+          length({{ string_text }})
           - length(
               replace({{ string_text }},  {{ delimiter_text }}, '')
           ) + 2 {{ part_number }}

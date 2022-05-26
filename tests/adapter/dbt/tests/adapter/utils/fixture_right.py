@@ -1,4 +1,3 @@
-
 # right
 
 seeds__data_right_csv = """string_text,length_expression,output

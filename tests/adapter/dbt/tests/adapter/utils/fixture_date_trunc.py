@@ -1,4 +1,3 @@
-
 # date_trunc
 
 seeds__data_date_trunc_csv = """updated_at,day,month

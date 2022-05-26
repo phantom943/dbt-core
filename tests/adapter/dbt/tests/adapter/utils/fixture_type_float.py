@@ -1,5 +1,3 @@
-
-
 # type_float
 
 # TODO - implement expected results here

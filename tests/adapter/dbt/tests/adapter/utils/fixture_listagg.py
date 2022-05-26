@@ -1,4 +1,3 @@
-
 # listagg
 
 seeds__data_listagg_csv = """group_col,string_text,order_col

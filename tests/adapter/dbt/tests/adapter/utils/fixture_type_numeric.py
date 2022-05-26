@@ -1,5 +1,3 @@
-
-
 # type_numeric
 
 # TODO - implement expected results here

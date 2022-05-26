@@ -1,4 +1,3 @@
-
 # hash
 
 seeds__data_hash_csv = """input_1,output

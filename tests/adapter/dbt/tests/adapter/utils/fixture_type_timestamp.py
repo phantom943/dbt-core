@@ -1,5 +1,3 @@
-
-
 # type_timestamp
 
 # TODO - implement expected results here

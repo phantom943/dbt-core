@@ -1,4 +1,3 @@
-
 # any_value
 
 seeds__data_any_value_csv = """id,key_name,static_col

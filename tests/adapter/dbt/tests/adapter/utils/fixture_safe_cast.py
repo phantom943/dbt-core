@@ -1,4 +1,3 @@
-
 # safe_cast
 
 seeds__data_safe_cast_csv = """field,output

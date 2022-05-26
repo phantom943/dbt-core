@@ -1,4 +1,3 @@
-
 # intersect
 
 seeds__data_intersect_a_csv = """id

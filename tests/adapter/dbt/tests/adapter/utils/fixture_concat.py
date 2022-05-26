@@ -1,5 +1,3 @@
-
-
 # concat
 
 seeds__data_concat_csv = """input_1,input_2,output

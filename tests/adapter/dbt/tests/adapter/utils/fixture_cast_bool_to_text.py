@@ -1,4 +1,3 @@
-
 # cast_bool_to_text
 
 models__test_cast_bool_to_text_sql = """

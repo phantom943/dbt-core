@@ -8,5 +8,5 @@
         {{ string_text }},
         {{ length_expression }}
     )
-    
+
 {%- endmacro -%}

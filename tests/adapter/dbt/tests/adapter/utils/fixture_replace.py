@@ -1,4 +1,3 @@
-
 # replace
 
 seeds__data_replace_csv = """string_text,search_chars,replace_chars,result

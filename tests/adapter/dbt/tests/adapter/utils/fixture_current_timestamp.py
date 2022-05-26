@@ -1,4 +1,3 @@
-
 # current_timestamp
 
 # TODO how can we test this better?

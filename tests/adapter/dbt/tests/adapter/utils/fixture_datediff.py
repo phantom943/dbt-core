@@ -1,4 +1,3 @@
-
 # datediff
 
 seeds__data_datediff_csv = """first_date,second_date,datepart,result

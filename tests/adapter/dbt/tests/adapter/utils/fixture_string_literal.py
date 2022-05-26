@@ -1,4 +1,3 @@
-
 # string_literal
 
 models__test_string_literal_sql = """

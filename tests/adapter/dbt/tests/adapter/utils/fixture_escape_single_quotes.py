@@ -1,4 +1,3 @@
-
 # escape_single_quotes
 
 models__test_escape_single_quotes_quote_sql = """

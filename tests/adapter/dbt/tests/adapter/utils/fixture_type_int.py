@@ -1,5 +1,3 @@
-
-
 # type_int
 
 # TODO - implement expected results here

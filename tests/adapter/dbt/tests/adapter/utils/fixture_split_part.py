@@ -1,4 +1,3 @@
-
 # split_part
 
 seeds__data_split_part_csv = """parts,split_on,result_1,result_2,result_3

@@ -1,4 +1,3 @@
-
 # except
 
 seeds__data_except_a_csv = """id

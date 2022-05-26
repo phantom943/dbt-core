@@ -1,5 +1,3 @@
-
-
 # type_bigint
 
 # TODO - implement expected results here

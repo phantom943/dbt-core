@@ -1,4 +1,3 @@
-
 # position
 
 seeds__data_position_csv = """substring_text,string_text,result

@@ -1,4 +1,3 @@
-
 # last_day
 
 seeds__data_last_day_csv = """date_day,date_part,result

@@ -1,4 +1,3 @@
-
 # bool_or
 
 seeds__data_bool_or_csv = """key,val1,val2

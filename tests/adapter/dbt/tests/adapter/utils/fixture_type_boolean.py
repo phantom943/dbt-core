@@ -1,5 +1,3 @@
-
-
 # type_boolean
 
 # TODO - implement expected results here
