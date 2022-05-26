@@ -29,21 +29,5 @@ class BaseEscapeSingleQuotesBackslash(BaseUtils):
         }
 
 
-@pytest.mark.only_profile("postgres")
-class TestEscapeSingleQuotesPostgres(BaseEscapeSingleQuotesQuote):
-    pass
-
-
-@pytest.mark.only_profile("redshift")
-class TestEscapeSingleQuotesRedshift(BaseEscapeSingleQuotesQuote):
-    pass
-
-
-@pytest.mark.only_profile("snowflake")
-class TestEscapeSingleQuotesSnowflake(BaseEscapeSingleQuotesBackslash):
-    pass
-
-
-@pytest.mark.only_profile("bigquery")
-class TestEscapeSingleQuotesBigQuery(BaseEscapeSingleQuotesBackslash):
+class TestEscapeSingleQuotes(BaseEscapeSingleQuotesQuote):
     pass
