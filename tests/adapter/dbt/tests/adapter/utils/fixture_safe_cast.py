@@ -15,7 +15,7 @@ with data as (
 )
 
 select
-    {{ safe_cast('field', type_string()) }} as actual,
+    {{ safe_cast('field', api.Column.translate_type('string')) }} as actual,
     output as expected
 
 from data
