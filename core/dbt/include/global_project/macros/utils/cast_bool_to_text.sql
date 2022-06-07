@@ -3,5 +3,5 @@
 {% endmacro %}
 
 {% macro default__cast_bool_to_text(field) %}
-    cast({{ field }} as {{ dbt.type_string() }})
+    cast({{ field }} as {{ dbt_utils.type_string() }})
 {% endmacro %}
