@@ -10,7 +10,7 @@ class CleanTask(ProjectOnlyTask):
 
     def __is_project_path(self, path):
         proj_path = os.path.abspath('.')
-        return not os.path.commonprefix(
+        return os.path.commonprefix(
             [proj_path, os.path.abspath(path)]
         ) == proj_path
 
