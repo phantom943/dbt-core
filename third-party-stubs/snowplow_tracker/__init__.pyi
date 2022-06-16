@@ -15,13 +15,22 @@ class Subject:
     def set_useragent(self, ua: Any): ...
     def set_network_user_id(self, nuid: Any): ...
 
-
 logger: logging.Logger
 
-
 class Emitter:
-    def __init__(self, endpoint: str, protocol: str = ..., port: Optional[int] = ..., method: str = ..., buffer_size: Optional[int] = ..., on_success: Optional[Any] = ..., on_failure: Optional[Any] = ..., byte_limit: Optional[int] = ...) -> None: ...
-
+    endpoint: str
+    def __init__(
+        self,
+        endpoint: str,
+        protocol: str = ...,
+        port: Optional[int] = ...,
+        method: str = ...,
+        buffer_size: Optional[int] = ...,
+        on_success: Optional[Any] = ...,
+        on_failure: Optional[Any] = ...,
+        byte_limit: Optional[int] = ...,
+    ) -> None: ...
+    def is_good_status_code(self, status_code: int) -> bool: ...
 
 class Tracker:
     emitters: Union[List[Any], Any] = ...
@@ -29,9 +38,26 @@ class Tracker:
     namespace: Optional[str] = ...
     app_id: Optional[str] = ...
     encode_base64: bool = ...
-
-    def __init__(self, emitters: Union[List[Any], Any], subject: Optional[Subject] = ..., namespace: Optional[str] = ..., app_id: Optional[str] = ..., encode_base64: bool = ...) -> None: ...
-
+    def __init__(
+        self,
+        emitters: Union[List[Any], Any],
+        subject: Optional[Subject] = ...,
+        namespace: Optional[str] = ...,
+        app_id: Optional[str] = ...,
+        encode_base64: bool = ...,
+    ) -> None: ...
+    def set_subject(self, subject: Optional[Subject]): ...
+    def track_struct_event(
+        self,
+        category: str,
+        action: str,
+        label: Optional[str] = None,
+        property_: Optional[str] = None,
+        value: Optional[float] = None,
+        context: Optional[List[Any]] = None,
+        tstamp: Optional[Any] = None,
+    ): ...
+    def flush(self, asynchronous: bool = False): ...
 
 class SelfDescribingJson:
     schema: Any = ...

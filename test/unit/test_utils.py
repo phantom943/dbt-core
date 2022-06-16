@@ -87,12 +87,11 @@ class TestDeepMap(unittest.TestCase):
                 },
             ],
         }
-        actual = dbt.utils.deep_map(self.intify_all, self.input_value)
+        actual = dbt.utils.deep_map_render(self.intify_all, self.input_value)
         self.assertEqual(actual, expected)
 
-        actual = dbt.utils.deep_map(self.intify_all, expected)
+        actual = dbt.utils.deep_map_render(self.intify_all, expected)
         self.assertEqual(actual, expected)
-
 
     @staticmethod
     def special_keypath(value, keypath):
@@ -120,22 +119,110 @@ class TestDeepMap(unittest.TestCase):
                 },
             ],
         }
-        actual = dbt.utils.deep_map(self.special_keypath, self.input_value)
+        actual = dbt.utils.deep_map_render(self.special_keypath, self.input_value)
         self.assertEqual(actual, expected)
 
-        actual = dbt.utils.deep_map(self.special_keypath, expected)
+        actual = dbt.utils.deep_map_render(self.special_keypath, expected)
         self.assertEqual(actual, expected)
 
     def test__noop(self):
-        actual = dbt.utils.deep_map(lambda x, _: x, self.input_value)
+        actual = dbt.utils.deep_map_render(lambda x, _: x, self.input_value)
         self.assertEqual(actual, self.input_value)
 
     def test_trivial(self):
         cases = [[], {}, 1, 'abc', None, True]
         for case in cases:
-            result = dbt.utils.deep_map(lambda x, _: x, case)
+            result = dbt.utils.deep_map_render(lambda x, _: x, case)
             self.assertEqual(result, case)
 
         with self.assertRaises(dbt.exceptions.DbtConfigError):
-            dbt.utils.deep_map(lambda x, _: x, {'foo': object()})
+            dbt.utils.deep_map_render(lambda x, _: x, {'foo': object()})
 
+
+class TestBytesFormatting(unittest.TestCase):
+
+    def test__simple_cases(self):
+        self.assertEqual(dbt.utils.format_bytes(-1), '-1.0 Bytes')
+        self.assertEqual(dbt.utils.format_bytes(0), '0.0 Bytes')
+        self.assertEqual(dbt.utils.format_bytes(20), '20.0 Bytes')
+        self.assertEqual(dbt.utils.format_bytes(1030), '1.0 KB')
+        self.assertEqual(dbt.utils.format_bytes(1024**2*1.5), '1.5 MB')
+        self.assertEqual(dbt.utils.format_bytes(1024**3*52.6), '52.6 GB')
+        self.assertEqual(dbt.utils.format_bytes(1024**4*128), '128.0 TB')
+        self.assertEqual(dbt.utils.format_bytes(1024**5), '1.0 PB')
+        self.assertEqual(dbt.utils.format_bytes(1024**5*31.4), '31.4 PB')
+        self.assertEqual(dbt.utils.format_bytes(1024**6), '1024.0 PB')
+        self.assertEqual(dbt.utils.format_bytes(1024**6*42), '43008.0 PB')
+
+
+class TestRowsNumberFormatting(unittest.TestCase):
+
+    def test__simple_cases(self):
+        self.assertEqual(dbt.utils.format_rows_number(-1), '-1.0')
+        self.assertEqual(dbt.utils.format_rows_number(0), '0.0')
+        self.assertEqual(dbt.utils.format_rows_number(20), '20.0')
+        self.assertEqual(dbt.utils.format_rows_number(1030), '1.0k')
+        self.assertEqual(dbt.utils.format_rows_number(1000**2*1.5), '1.5m')
+        self.assertEqual(dbt.utils.format_rows_number(1000**3*52.6), '52.6b')
+        self.assertEqual(dbt.utils.format_rows_number(1000**3*128), '128.0b')
+        self.assertEqual(dbt.utils.format_rows_number(1000**4), '1.0t')
+        self.assertEqual(dbt.utils.format_rows_number(1000**4*31.4), '31.4t')
+        self.assertEqual(dbt.utils.format_rows_number(1000**5*31.4), '31400.0t')  # noqa: E501
+
+
+class TestMultiDict(unittest.TestCase):
+    def test_one_member(self):
+        dct = {'a': 1, 'b': 2, 'c': 3}
+        md = dbt.utils.MultiDict([dct])
+        assert len(md) == 3
+        for key in 'abc':
+            assert key in md
+        assert md['a'] == 1
+        assert md['b'] == 2
+        assert md['c'] == 3
+
+    def test_two_members_no_overlap(self):
+        first = {'a': 1, 'b': 2, 'c': 3}
+        second = {'d': 1, 'e': 2, 'f': 3}
+        md = dbt.utils.MultiDict([first, second])
+        assert len(md) == 6
+        for key in 'abcdef':
+            assert key in md
+        assert md['a'] == 1
+        assert md['b'] == 2
+        assert md['c'] == 3
+        assert md['d'] == 1
+        assert md['e'] == 2
+        assert md['f'] == 3
+
+    def test_two_members_overlap(self):
+        first = {'a': 1, 'b': 2, 'c': 3}
+        second = {'c': 1, 'd': 2, 'e': 3}
+        md = dbt.utils.MultiDict([first, second])
+        assert len(md) == 5
+        for key in 'abcde':
+            assert key in md
+        assert md['a'] == 1
+        assert md['b'] == 2
+        assert md['c'] == 1
+        assert md['d'] == 2
+        assert md['e'] == 3
+
+class TestHumanizeExecutionTime(unittest.TestCase):
+    def test_humanzing_execution_time_with_integer(self):
+
+        result = dbt.utils.humanize_execution_time(execution_time=9460)
+
+        assert result == " in 2 hours 37 minutes and 40.00 seconds"
+
+    def test_humanzing_execution_time_with_two_decimal_place_float(self):
+
+        result = dbt.utils.humanize_execution_time(execution_time=0.32)
+
+        assert result == " in 0 hours 0 minutes and 0.32 seconds"
+
+    def test_humanzing_execution_time_with_four_decimal_place_float(self):
+
+        result = dbt.utils.humanize_execution_time(execution_time=0.3254)
+
+        assert result == " in 0 hours 0 minutes and 0.33 seconds"

@@ -1,168 +1,143 @@
-from dataclasses import dataclass, field, Field
+import os
+import time
+from dataclasses import dataclass, field
+from mashumaro.types import SerializableType
+from pathlib import Path
 from typing import (
     Optional,
     Union,
     List,
     Dict,
     Any,
-    Type,
+    Sequence,
     Tuple,
-    NewType,
-    MutableMapping,
-    Callable,
+    Iterator,
+    TypeVar,
 )
 
-from hologram import JsonSchemaMixin
-from hologram.helpers import (
-    StrEnum, register_pattern
-)
+from dbt.dataclass_schema import dbtClassMixin, ExtensibleDbtClassMixin
 
-from dbt.clients.jinja import MacroGenerator
-import dbt.flags
+from dbt.clients.system import write_file
+from dbt.contracts.files import FileHash, MAXIMUM_SEED_SIZE_NAME
 from dbt.contracts.graph.unparsed import (
-    UnparsedNode, UnparsedMacro, UnparsedDocumentationFile, Quoting,
-    UnparsedBaseNode, FreshnessThreshold, ExternalTable,
-    AdditionalPropertiesAllowed
+    UnparsedNode,
+    UnparsedDocumentation,
+    Quoting,
+    Docs,
+    UnparsedBaseNode,
+    FreshnessThreshold,
+    ExternalTable,
+    HasYamlMetadata,
+    MacroArgument,
+    UnparsedSourceDefinition,
+    UnparsedSourceTableDefinition,
+    UnparsedColumn,
+    TestDef,
+    ExposureOwner,
+    ExposureType,
+    MaturityType,
+    MetricFilter,
 )
-from dbt.contracts.util import Replaceable, list_str
-from dbt.logger import GLOBAL_LOGGER as logger  # noqa
+from dbt.contracts.util import Replaceable, AdditionalPropertiesMixin
+from dbt.exceptions import warn_or_error
+from dbt import flags
 from dbt.node_types import NodeType
 
 
-class SnapshotStrategy(StrEnum):
-    Timestamp = 'timestamp'
-    Check = 'check'
-
-
-class All(StrEnum):
-    All = 'all'
-
-
-@dataclass
-class Hook(JsonSchemaMixin, Replaceable):
-    sql: str
-    transaction: bool = True
-    index: Optional[int] = None
-
-
-def insensitive_patterns(*patterns: str):
-    lowercased = []
-    for pattern in patterns:
-        lowercased.append(
-            ''.join('[{}{}]'.format(s.upper(), s.lower()) for s in pattern)
-        )
-    return '^({})$'.format('|'.join(lowercased))
-
-
-Severity = NewType('Severity', str)
-register_pattern(Severity, insensitive_patterns('warn', 'error'))
+from .model_config import (
+    NodeConfig,
+    SeedConfig,
+    TestConfig,
+    SourceConfig,
+    EmptySnapshotConfig,
+    SnapshotConfig,
+)
 
 
 @dataclass
-class NodeConfig(
-    AdditionalPropertiesAllowed, Replaceable, MutableMapping[str, Any]
-):
-    enabled: bool = True
-    materialized: str = 'view'
-    persist_docs: Dict[str, Any] = field(default_factory=dict)
-    post_hook: List[Hook] = field(default_factory=list)
-    pre_hook: List[Hook] = field(default_factory=list)
-    vars: Dict[str, Any] = field(default_factory=dict)
-    quoting: Dict[str, Any] = field(default_factory=dict)
-    column_types: Dict[str, Any] = field(default_factory=dict)
-    tags: Union[List[str], str] = field(default_factory=list_str)
-
-    @classmethod
-    def field_mapping(cls):
-        return {'post_hook': 'post-hook', 'pre_hook': 'pre-hook'}
-
-    # Implement MutableMapping so this config will behave as some macros expect
-    # during parsing (notably, syntax like `{{ node.config['schema'] }}`)
-
-    def __getitem__(self, key):
-        """Handle parse-time use of `config` as a dictionary, making the extra
-        values available during parsing.
-        """
-        if hasattr(self, key):
-            return getattr(self, key)
-        else:
-            return self._extra[key]
-
-    def __setitem__(self, key, value):
-        if hasattr(self, key):
-            setattr(self, key, value)
-        else:
-            self._extra[key] = value
-
-    def __delitem__(self, key):
-        if hasattr(self, key):
-            msg = (
-                'Error, tried to delete config key "{}": Cannot delete '
-                'built-in keys'
-            ).format(key)
-            raise dbt.exceptions.CompilationException(msg)
-        else:
-            del self._extra[key]
-
-    def __iter__(self):
-        for fld in self._get_fields():
-            yield fld.name
-
-        for key in self._extra:
-            yield key
-
-    def __len__(self):
-        return len(self._get_fields()) + len(self._extra)
-
-
-@dataclass
-class ColumnInfo(JsonSchemaMixin, Replaceable):
+class ColumnInfo(AdditionalPropertiesMixin, ExtensibleDbtClassMixin, Replaceable):
     name: str
-    description: str = ''
+    description: str = ""
+    meta: Dict[str, Any] = field(default_factory=dict)
     data_type: Optional[str] = None
-
-
-# Docrefs are not quite like regular references, as they indicate what they
-# apply to as well as what they are referring to (so the doc package + doc
-# name, but also the column name if relevant). This is because column
-# descriptions are rendered separately from their models.
-@dataclass
-class Docref(JsonSchemaMixin, Replaceable):
-    documentation_name: str
-    documentation_package: str
-    column_name: Optional[str] = None
+    quote: Optional[bool] = None
+    tags: List[str] = field(default_factory=list)
+    _extra: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class HasFqn(JsonSchemaMixin, Replaceable):
+class HasFqn(dbtClassMixin, Replaceable):
     fqn: List[str]
 
+    def same_fqn(self, other: "HasFqn") -> bool:
+        return self.fqn == other.fqn
+
 
 @dataclass
-class HasUniqueID(JsonSchemaMixin, Replaceable):
+class HasUniqueID(dbtClassMixin, Replaceable):
     unique_id: str
 
 
 @dataclass
-class DependsOn(JsonSchemaMixin, Replaceable):
-    nodes: List[str] = field(default_factory=list)
+class MacroDependsOn(dbtClassMixin, Replaceable):
     macros: List[str] = field(default_factory=list)
+
+    # 'in' on lists is O(n) so this is O(n^2) for # of macros
+    def add_macro(self, value: str):
+        if value not in self.macros:
+            self.macros.append(value)
 
 
 @dataclass
-class HasRelationMetadata(JsonSchemaMixin, Replaceable):
-    database: str
+class DependsOn(MacroDependsOn):
+    nodes: List[str] = field(default_factory=list)
+
+    def add_node(self, value: str):
+        if value not in self.nodes:
+            self.nodes.append(value)
+
+
+@dataclass
+class HasRelationMetadata(dbtClassMixin, Replaceable):
+    database: Optional[str]
     schema: str
 
+    # Can't set database to None like it ought to be
+    # because it messes up the subclasses and default parameters
+    # so hack it here
+    @classmethod
+    def __pre_deserialize__(cls, data):
+        data = super().__pre_deserialize__(data)
+        if "database" not in data:
+            data["database"] = None
+        return data
 
-class ParsedNodeMixins:
+
+class ParsedNodeMixins(dbtClassMixin):
+    resource_type: NodeType
+    depends_on: DependsOn
+    config: NodeConfig
+
     @property
     def is_refable(self):
         return self.resource_type in NodeType.refable()
 
     @property
+    def should_store_failures(self):
+        return self.resource_type == NodeType.Test and (
+            self.config.store_failures
+            if self.config.store_failures is not None
+            else flags.STORE_FAILURES
+        )
+
+    # will this node map to an object in the database?
+    @property
+    def is_relational(self):
+        return self.resource_type in NodeType.refable() or self.should_store_failures
+
+    @property
     def is_ephemeral(self):
-        return self.config.materialized == 'ephemeral'
+        return self.config.materialized == "ephemeral"
 
     @property
     def is_ephemeral_model(self):
@@ -172,33 +147,27 @@ class ParsedNodeMixins:
     def depends_on_nodes(self):
         return self.depends_on.nodes
 
-    def patch(self, patch):
+    def patch(self, patch: "ParsedNodePatch"):
         """Given a ParsedNodePatch, add the new information to the node."""
         # explicitly pick out the parts to update so we don't inadvertently
         # step on the model name or anything
-        self.patch_path = patch.original_file_path
+        # Note: config should already be updated
+        self.patch_path: Optional[str] = patch.file_id
+        # update created_at so process_docs will run in partial parsing
+        self.created_at = time.time()
         self.description = patch.description
         self.columns = patch.columns
-        self.docrefs = patch.docrefs
-        if dbt.flags.STRICT_MODE:
-            self.to_dict(validate=True)
+        self.docs = patch.docs
 
     def get_materialization(self):
         return self.config.materialized
 
-    def local_vars(self):
-        return self.config.vars
-
 
 @dataclass
-class ParsedNodeMandatory(
-    UnparsedNode,
-    HasUniqueID,
-    HasFqn,
-    HasRelationMetadata,
-    Replaceable
-):
+class ParsedNodeMandatory(UnparsedNode, HasUniqueID, HasFqn, HasRelationMetadata, Replaceable):
     alias: str
+    checksum: FileHash
+    config: NodeConfig = field(default_factory=NodeConfig)
 
     @property
     def identifier(self):
@@ -206,179 +175,289 @@ class ParsedNodeMandatory(
 
 
 @dataclass
-class ParsedNodeDefaults(ParsedNodeMandatory):
-    config: NodeConfig = field(default_factory=NodeConfig)
-    tags: List[str] = field(default_factory=list)
-    refs: List[List[str]] = field(default_factory=list)
-    sources: List[List[Any]] = field(default_factory=list)
-    depends_on: DependsOn = field(default_factory=DependsOn)
-    docrefs: List[Docref] = field(default_factory=list)
-    description: str = field(default='')
-    columns: Dict[str, ColumnInfo] = field(default_factory=dict)
-    patch_path: Optional[str] = None
-    build_path: Optional[str] = None
+class NodeInfoMixin:
+    _event_status: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def node_info(self):
+        node_info = {
+            "node_path": getattr(self, "path", None),
+            "node_name": getattr(self, "name", None),
+            "unique_id": getattr(self, "unique_id", None),
+            "resource_type": str(getattr(self, "resource_type", "")),
+            "materialized": self.config.get("materialized"),
+            "node_status": str(self._event_status.get("node_status")),
+            "node_started_at": self._event_status.get("started_at"),
+            "node_finished_at": self._event_status.get("finished_at"),
+        }
+        return node_info
 
 
 @dataclass
-class ParsedNode(ParsedNodeDefaults, ParsedNodeMixins):
-    pass
+class ParsedNodeDefaults(NodeInfoMixin, ParsedNodeMandatory):
+    tags: List[str] = field(default_factory=list)
+    refs: List[List[str]] = field(default_factory=list)
+    sources: List[List[str]] = field(default_factory=list)
+    depends_on: DependsOn = field(default_factory=DependsOn)
+    description: str = field(default="")
+    columns: Dict[str, ColumnInfo] = field(default_factory=dict)
+    meta: Dict[str, Any] = field(default_factory=dict)
+    docs: Docs = field(default_factory=Docs)
+    patch_path: Optional[str] = None
+    compiled_path: Optional[str] = None
+    build_path: Optional[str] = None
+    deferred: bool = False
+    unrendered_config: Dict[str, Any] = field(default_factory=dict)
+    created_at: float = field(default_factory=lambda: time.time())
+    config_call_dict: Dict[str, Any] = field(default_factory=dict)
+
+    def write_node(self, target_path: str, subdirectory: str, payload: str):
+        if os.path.basename(self.path) == os.path.basename(self.original_file_path):
+            # One-to-one relationship of nodes to files.
+            path = self.original_file_path
+        else:
+            #  Many-to-one relationship of nodes to files.
+            path = os.path.join(self.original_file_path, self.path)
+        full_path = os.path.join(target_path, subdirectory, self.package_name, path)
+
+        write_file(full_path, payload)
+        return full_path
+
+
+T = TypeVar("T", bound="ParsedNode")
+
+
+@dataclass
+class ParsedNode(ParsedNodeDefaults, ParsedNodeMixins, SerializableType):
+    def _serialize(self):
+        return self.to_dict()
+
+    def __post_serialize__(self, dct):
+        if "_event_status" in dct:
+            del dct["_event_status"]
+        return dct
+
+    @classmethod
+    def _deserialize(cls, dct: Dict[str, int]):
+        # The serialized ParsedNodes do not differ from each other
+        # in fields that would allow 'from_dict' to distinguis
+        # between them.
+        resource_type = dct["resource_type"]
+        if resource_type == "model":
+            return ParsedModelNode.from_dict(dct)
+        elif resource_type == "analysis":
+            return ParsedAnalysisNode.from_dict(dct)
+        elif resource_type == "seed":
+            return ParsedSeedNode.from_dict(dct)
+        elif resource_type == "rpc":
+            return ParsedRPCNode.from_dict(dct)
+        elif resource_type == "sql":
+            return ParsedSqlNode.from_dict(dct)
+        elif resource_type == "test":
+            if "test_metadata" in dct:
+                return ParsedGenericTestNode.from_dict(dct)
+            else:
+                return ParsedSingularTestNode.from_dict(dct)
+        elif resource_type == "operation":
+            return ParsedHookNode.from_dict(dct)
+        elif resource_type == "seed":
+            return ParsedSeedNode.from_dict(dct)
+        elif resource_type == "snapshot":
+            return ParsedSnapshotNode.from_dict(dct)
+        else:
+            return cls.from_dict(dct)
+
+    def _persist_column_docs(self) -> bool:
+        if hasattr(self.config, "persist_docs"):
+            assert isinstance(self.config, NodeConfig)
+            return bool(self.config.persist_docs.get("columns"))
+        return False
+
+    def _persist_relation_docs(self) -> bool:
+        if hasattr(self.config, "persist_docs"):
+            assert isinstance(self.config, NodeConfig)
+            return bool(self.config.persist_docs.get("relation"))
+        return False
+
+    def same_body(self: T, other: T) -> bool:
+        return self.raw_sql == other.raw_sql
+
+    def same_persisted_description(self: T, other: T) -> bool:
+        # the check on configs will handle the case where we have different
+        # persist settings, so we only have to care about the cases where they
+        # are the same..
+        if self._persist_relation_docs():
+            if self.description != other.description:
+                return False
+
+        if self._persist_column_docs():
+            # assert other._persist_column_docs()
+            column_descriptions = {k: v.description for k, v in self.columns.items()}
+            other_column_descriptions = {k: v.description for k, v in other.columns.items()}
+            if column_descriptions != other_column_descriptions:
+                return False
+
+        return True
+
+    def same_database_representation(self, other: T) -> bool:
+        # compare the config representation, not the node's config value. This
+        # compares the configured value, rather than the ultimate value (so
+        # generate_*_name and unset values derived from the target are
+        # ignored)
+        keys = ("database", "schema", "alias")
+        for key in keys:
+            mine = self.unrendered_config.get(key)
+            others = other.unrendered_config.get(key)
+            if mine != others:
+                return False
+        return True
+
+    def same_config(self, old: T) -> bool:
+        return self.config.same_contents(
+            self.unrendered_config,
+            old.unrendered_config,
+        )
+
+    def same_contents(self: T, old: Optional[T]) -> bool:
+        if old is None:
+            return False
+
+        return (
+            self.same_body(old)
+            and self.same_config(old)
+            and self.same_persisted_description(old)
+            and self.same_fqn(old)
+            and self.same_database_representation(old)
+            and True
+        )
 
 
 @dataclass
 class ParsedAnalysisNode(ParsedNode):
-    resource_type: NodeType = field(metadata={'restrict': [NodeType.Analysis]})
+    resource_type: NodeType = field(metadata={"restrict": [NodeType.Analysis]})
 
 
 @dataclass
 class ParsedHookNode(ParsedNode):
-    resource_type: NodeType = field(
-        metadata={'restrict': [NodeType.Operation]}
-    )
+    resource_type: NodeType = field(metadata={"restrict": [NodeType.Operation]})
     index: Optional[int] = None
 
 
 @dataclass
 class ParsedModelNode(ParsedNode):
-    resource_type: NodeType = field(metadata={'restrict': [NodeType.Model]})
+    resource_type: NodeType = field(metadata={"restrict": [NodeType.Model]})
+
+
+# TODO: rm?
+@dataclass
+class ParsedRPCNode(ParsedNode):
+    resource_type: NodeType = field(metadata={"restrict": [NodeType.RPCCall]})
 
 
 @dataclass
-class ParsedRPCNode(ParsedNode):
-    resource_type: NodeType = field(metadata={'restrict': [NodeType.RPCCall]})
+class ParsedSqlNode(ParsedNode):
+    resource_type: NodeType = field(metadata={"restrict": [NodeType.SqlOperation]})
 
 
-class SeedConfig(NodeConfig):
-    quote_columns: Optional[bool] = None
+def same_seeds(first: ParsedNode, second: ParsedNode) -> bool:
+    # for seeds, we check the hashes. If the hashes are different types,
+    # no match. If the hashes are both the same 'path', log a warning and
+    # assume they are the same
+    # if the current checksum is a path, we want to log a warning.
+    result = first.checksum == second.checksum
+
+    if first.checksum.name == "path":
+        msg: str
+        if second.checksum.name != "path":
+            msg = (
+                f"Found a seed ({first.package_name}.{first.name}) "
+                f">{MAXIMUM_SEED_SIZE_NAME} in size. The previous file was "
+                f"<={MAXIMUM_SEED_SIZE_NAME}, so it has changed"
+            )
+        elif result:
+            msg = (
+                f"Found a seed ({first.package_name}.{first.name}) "
+                f">{MAXIMUM_SEED_SIZE_NAME} in size at the same path, dbt "
+                f"cannot tell if it has changed: assuming they are the same"
+            )
+        elif not result:
+            msg = (
+                f"Found a seed ({first.package_name}.{first.name}) "
+                f">{MAXIMUM_SEED_SIZE_NAME} in size. The previous file was in "
+                f"a different location, assuming it has changed"
+            )
+        else:
+            msg = (
+                f"Found a seed ({first.package_name}.{first.name}) "
+                f">{MAXIMUM_SEED_SIZE_NAME} in size. The previous file had a "
+                f"checksum type of {second.checksum.name}, so it has changed"
+            )
+        warn_or_error(msg, node=first)
+
+    return result
 
 
 @dataclass
 class ParsedSeedNode(ParsedNode):
-    resource_type: NodeType = field(metadata={'restrict': [NodeType.Seed]})
+    # keep this in sync with CompiledSeedNode!
+    resource_type: NodeType = field(metadata={"restrict": [NodeType.Seed]})
     config: SeedConfig = field(default_factory=SeedConfig)
-    seed_file_path: str = ''
-
-    def __post_init__(self):
-        if self.seed_file_path == '':
-            raise dbt.exceptions.InternalException(
-                'Seeds should always have a seed_file_path'
-            )
 
     @property
     def empty(self):
-        """ Seeds are never empty"""
+        """Seeds are never empty"""
         return False
 
-
-@dataclass
-class TestConfig(NodeConfig):
-    severity: Severity = Severity('error')
+    def same_body(self: T, other: T) -> bool:
+        return same_seeds(self, other)
 
 
 @dataclass
-class TestMetadata(JsonSchemaMixin):
-    namespace: Optional[str]
+class TestMetadata(dbtClassMixin, Replaceable):
     name: str
-    kwargs: Dict[str, Any]
+    # kwargs are the args that are left in the test builder after
+    # removing configs. They are set from the test builder when
+    # the test node is created.
+    kwargs: Dict[str, Any] = field(default_factory=dict)
+    namespace: Optional[str] = None
 
 
 @dataclass
-class ParsedTestNode(ParsedNode):
-    resource_type: NodeType = field(metadata={'restrict': [NodeType.Test]})
+class HasTestMetadata(dbtClassMixin):
+    test_metadata: TestMetadata
+
+
+@dataclass
+class ParsedSingularTestNode(ParsedNode):
+    resource_type: NodeType = field(metadata={"restrict": [NodeType.Test]})
+    # Was not able to make mypy happy and keep the code working. We need to
+    # refactor the various configs.
+    config: TestConfig = field(default_factory=TestConfig)  # type: ignore
+
+    @property
+    def test_node_type(self):
+        return "singular"
+
+
+@dataclass
+class ParsedGenericTestNode(ParsedNode, HasTestMetadata):
+    # keep this in sync with CompiledGenericTestNode!
+    resource_type: NodeType = field(metadata={"restrict": [NodeType.Test]})
     column_name: Optional[str] = None
-    config: TestConfig = field(default_factory=TestConfig)
-    test_metadata: Optional[TestMetadata] = None
+    file_key_name: Optional[str] = None
+    # Was not able to make mypy happy and keep the code working. We need to
+    # refactor the various configs.
+    config: TestConfig = field(default_factory=TestConfig)  # type: ignore
 
+    def same_contents(self, other) -> bool:
+        if other is None:
+            return False
 
-@dataclass(init=False)
-class _SnapshotConfig(NodeConfig):
-    unique_key: str = field(init=False, metadata=dict(init_required=True))
-    target_schema: str = field(init=False, metadata=dict(init_required=True))
-    target_database: Optional[str] = None
+        return self.same_config(other) and self.same_fqn(other) and True
 
-    def __init__(
-        self,
-        unique_key: str,
-        target_schema: str,
-        target_database: Optional[str] = None,
-        **kwargs
-    ) -> None:
-        self.unique_key = unique_key
-        self.target_schema = target_schema
-        self.target_database = target_database
-        super().__init__(**kwargs)
-
-    # type hacks...
-    @classmethod
-    def _get_fields(cls) -> List[Tuple[Field, str]]:  # type: ignore
-        fields: List[Tuple[Field, str]] = []
-        for old_field, name in super()._get_fields():
-            new_field = old_field
-            # tell hologram we're really an initvar
-            if old_field.metadata and old_field.metadata.get('init_required'):
-                new_field = field(init=True, metadata=old_field.metadata)
-                new_field.name = old_field.name
-                new_field.type = old_field.type
-                new_field._field_type = old_field._field_type  # type: ignore
-            fields.append((new_field, name))
-        return fields
-
-
-@dataclass(init=False)
-class GenericSnapshotConfig(_SnapshotConfig):
-    strategy: str = field(init=False, metadata=dict(init_required=True))
-
-    def __init__(self, strategy: str, **kwargs) -> None:
-        self.strategy = strategy
-        super().__init__(**kwargs)
-
-
-@dataclass(init=False)
-class TimestampSnapshotConfig(_SnapshotConfig):
-    strategy: str = field(
-        init=False,
-        metadata=dict(
-            restrict=[str(SnapshotStrategy.Timestamp)],
-            init_required=True,
-        ),
-    )
-    updated_at: str = field(init=False, metadata=dict(init_required=True))
-
-    def __init__(
-        self, strategy: str, updated_at: str, **kwargs
-    ) -> None:
-        self.strategy = strategy
-        self.updated_at = updated_at
-        super().__init__(**kwargs)
-
-
-@dataclass(init=False)
-class CheckSnapshotConfig(_SnapshotConfig):
-    strategy: str = field(
-        init=False,
-        metadata=dict(
-            restrict=[str(SnapshotStrategy.Check)],
-            init_required=True,
-        ),
-    )
-    # TODO: is there a way to get this to accept tuples of strings? Adding
-    # `Tuple[str, ...]` to the list of types results in this:
-    # ['email'] is valid under each of {'type': 'array', 'items':
-    # {'type': 'string'}}, {'type': 'array', 'items': {'type': 'string'}}
-    # but without it, parsing gets upset about values like `('email',)`
-    # maybe hologram itself should support this behavior? It's not like tuples
-    # are meaningful in json
-    check_cols: Union[All, List[str]] = field(
-        init=False,
-        metadata=dict(init_required=True),
-    )
-
-    def __init__(
-        self, strategy: str, check_cols: Union[All, List[str]],
-        **kwargs
-    ) -> None:
-        self.strategy = strategy
-        self.check_cols = check_cols
-        super().__init__(**kwargs)
+    @property
+    def test_node_type(self):
+        return "generic"
 
 
 @dataclass
@@ -389,124 +468,241 @@ class IntermediateSnapshotNode(ParsedNode):
     # defined in config blocks. To fix that, we have an intermediate type that
     # uses a regular node config, which the snapshot parser will then convert
     # into a full ParsedSnapshotNode after rendering.
-    resource_type: NodeType = field(metadata={'restrict': [NodeType.Snapshot]})
-
-
-def _create_if_else_chain(
-    key: str,
-    criteria: List[Tuple[str, Type[JsonSchemaMixin]]],
-    default: Type[JsonSchemaMixin]
-) -> Dict[str, Any]:
-    """Mutate a given schema key that contains a 'oneOf' to instead be an
-    'if-then-else' chain. This results is much better/more consistent errors
-    from jsonschema.
-    """
-    schema: Dict[str, Any] = {}
-    result: Dict[str, Any] = {}
-    criteria = criteria[:]
-    while criteria:
-        if_clause, then_clause = criteria.pop()
-        schema['if'] = {'properties': {
-            key: {'enum': [if_clause]}
-        }}
-        schema['then'] = then_clause.json_schema()
-        schema['else'] = {}
-        schema = schema['else']
-    schema.update(default.json_schema())
-    return result
+    resource_type: NodeType = field(metadata={"restrict": [NodeType.Snapshot]})
+    config: EmptySnapshotConfig = field(default_factory=EmptySnapshotConfig)
 
 
 @dataclass
 class ParsedSnapshotNode(ParsedNode):
-    resource_type: NodeType = field(metadata={'restrict': [NodeType.Snapshot]})
-    config: Union[
-        CheckSnapshotConfig,
-        TimestampSnapshotConfig,
-        GenericSnapshotConfig,
-    ]
+    resource_type: NodeType = field(metadata={"restrict": [NodeType.Snapshot]})
+    config: SnapshotConfig
 
-    @classmethod
-    def json_schema(cls, embeddable=False):
-        schema = super().json_schema(embeddable)
 
-        # mess with config
-        configs = [
-            (str(SnapshotStrategy.Check), CheckSnapshotConfig),
-            (str(SnapshotStrategy.Timestamp), TimestampSnapshotConfig),
-        ]
-
-        if embeddable:
-            dest = schema[cls.__name__]['properties']
-        else:
-            dest = schema['properties']
-        dest['config'] = _create_if_else_chain(
-            'strategy', configs, GenericSnapshotConfig
-        )
-        return schema
+@dataclass
+class ParsedPatch(HasYamlMetadata, Replaceable):
+    name: str
+    description: str
+    meta: Dict[str, Any]
+    docs: Docs
+    config: Dict[str, Any]
 
 
 # The parsed node update is only the 'patch', not the test. The test became a
 # regular parsed node. Note that description and columns must be present, but
 # may be empty.
 @dataclass
-class ParsedNodePatch(JsonSchemaMixin, Replaceable):
-    name: str
-    description: str
-    original_file_path: str
+class ParsedNodePatch(ParsedPatch):
     columns: Dict[str, ColumnInfo]
-    docrefs: List[Docref]
 
 
 @dataclass
-class MacroDependsOn(JsonSchemaMixin, Replaceable):
-    macros: List[str] = field(default_factory=list)
+class ParsedMacroPatch(ParsedPatch):
+    arguments: List[MacroArgument] = field(default_factory=list)
 
 
 @dataclass
-class ParsedMacro(UnparsedMacro, HasUniqueID):
+class ParsedMacro(UnparsedBaseNode, HasUniqueID):
     name: str
-    resource_type: NodeType = field(metadata={'restrict': [NodeType.Macro]})
+    macro_sql: str
+    resource_type: NodeType = field(metadata={"restrict": [NodeType.Macro]})
     # TODO: can macros even have tags?
     tags: List[str] = field(default_factory=list)
     # TODO: is this ever populated?
     depends_on: MacroDependsOn = field(default_factory=MacroDependsOn)
+    description: str = ""
+    meta: Dict[str, Any] = field(default_factory=dict)
+    docs: Docs = field(default_factory=Docs)
+    patch_path: Optional[str] = None
+    arguments: List[MacroArgument] = field(default_factory=list)
+    created_at: float = field(default_factory=lambda: time.time())
 
-    def local_vars(self):
-        return {}
+    def patch(self, patch: ParsedMacroPatch):
+        self.patch_path: Optional[str] = patch.file_id
+        self.description = patch.description
+        self.created_at = time.time()
+        self.meta = patch.meta
+        self.docs = patch.docs
+        self.arguments = patch.arguments
 
-    @property
-    def generator(self) -> Callable[[Dict[str, Any]], Callable]:
-        """
-        Returns a function that can be called to render the macro results.
-        """
-        return MacroGenerator(self)
+    def same_contents(self, other: Optional["ParsedMacro"]) -> bool:
+        if other is None:
+            return False
+        # the only thing that makes one macro different from another with the
+        # same name/package is its content
+        return self.macro_sql == other.macro_sql
 
 
 @dataclass
-class ParsedDocumentation(UnparsedDocumentationFile, HasUniqueID):
+class ParsedDocumentation(UnparsedDocumentation, HasUniqueID):
     name: str
     block_contents: str
 
+    @property
+    def search_name(self):
+        return self.name
+
+    def same_contents(self, other: Optional["ParsedDocumentation"]) -> bool:
+        if other is None:
+            return False
+        # the only thing that makes one doc different from another with the
+        # same name/package is its content
+        return self.block_contents == other.block_contents
+
+
+def normalize_test(testdef: TestDef) -> Dict[str, Any]:
+    if isinstance(testdef, str):
+        return {testdef: {}}
+    else:
+        return testdef
+
 
 @dataclass
-class ParsedSourceDefinition(
-        UnparsedBaseNode,
-        HasUniqueID,
-        HasRelationMetadata,
-        HasFqn):
+class UnpatchedSourceDefinition(UnparsedBaseNode, HasUniqueID, HasFqn):
+    source: UnparsedSourceDefinition
+    table: UnparsedSourceTableDefinition
+    resource_type: NodeType = field(metadata={"restrict": [NodeType.Source]})
+    patch_path: Optional[Path] = None
+
+    def get_full_source_name(self):
+        return f"{self.source.name}_{self.table.name}"
+
+    def get_source_representation(self):
+        return f'source("{self.source.name}", "{self.table.name}")'
+
+    @property
+    def name(self) -> str:
+        return self.get_full_source_name()
+
+    @property
+    def quote_columns(self) -> Optional[bool]:
+        result = None
+        if self.source.quoting.column is not None:
+            result = self.source.quoting.column
+        if self.table.quoting.column is not None:
+            result = self.table.quoting.column
+        return result
+
+    @property
+    def columns(self) -> Sequence[UnparsedColumn]:
+        return [] if self.table.columns is None else self.table.columns
+
+    def get_tests(self) -> Iterator[Tuple[Dict[str, Any], Optional[UnparsedColumn]]]:
+        for test in self.tests:
+            yield normalize_test(test), None
+
+        for column in self.columns:
+            if column.tests is not None:
+                for test in column.tests:
+                    yield normalize_test(test), column
+
+    @property
+    def tests(self) -> List[TestDef]:
+        if self.table.tests is None:
+            return []
+        else:
+            return self.table.tests
+
+
+@dataclass
+class ParsedSourceMandatory(
+    UnparsedBaseNode,
+    HasUniqueID,
+    HasRelationMetadata,
+    HasFqn,
+):
     name: str
     source_name: str
     source_description: str
     loader: str
     identifier: str
-    resource_type: NodeType = field(metadata={'restrict': [NodeType.Source]})
+    resource_type: NodeType = field(metadata={"restrict": [NodeType.Source]})
+
+
+@dataclass
+class ParsedSourceDefinition(NodeInfoMixin, ParsedSourceMandatory):
     quoting: Quoting = field(default_factory=Quoting)
     loaded_at_field: Optional[str] = None
     freshness: Optional[FreshnessThreshold] = None
     external: Optional[ExternalTable] = None
-    docrefs: List[Docref] = field(default_factory=list)
-    description: str = ''
+    description: str = ""
     columns: Dict[str, ColumnInfo] = field(default_factory=dict)
+    meta: Dict[str, Any] = field(default_factory=dict)
+    source_meta: Dict[str, Any] = field(default_factory=dict)
+    tags: List[str] = field(default_factory=list)
+    config: SourceConfig = field(default_factory=SourceConfig)
+    patch_path: Optional[Path] = None
+    unrendered_config: Dict[str, Any] = field(default_factory=dict)
+    relation_name: Optional[str] = None
+    created_at: float = field(default_factory=lambda: time.time())
+
+    def __post_serialize__(self, dct):
+        if "_event_status" in dct:
+            del dct["_event_status"]
+        return dct
+
+    def same_database_representation(self, other: "ParsedSourceDefinition") -> bool:
+        return (
+            self.database == other.database
+            and self.schema == other.schema
+            and self.identifier == other.identifier
+            and True
+        )
+
+    def same_quoting(self, other: "ParsedSourceDefinition") -> bool:
+        return self.quoting == other.quoting
+
+    def same_freshness(self, other: "ParsedSourceDefinition") -> bool:
+        return (
+            self.freshness == other.freshness
+            and self.loaded_at_field == other.loaded_at_field
+            and True
+        )
+
+    def same_external(self, other: "ParsedSourceDefinition") -> bool:
+        return self.external == other.external
+
+    def same_config(self, old: "ParsedSourceDefinition") -> bool:
+        return self.config.same_contents(
+            self.unrendered_config,
+            old.unrendered_config,
+        )
+
+    def same_contents(self, old: Optional["ParsedSourceDefinition"]) -> bool:
+        # existing when it didn't before is a change!
+        if old is None:
+            return True
+
+        # config changes are changes (because the only config is "enabled", and
+        # enabling a source is a change!)
+        # changing the database/schema/identifier is a change
+        # messing around with external stuff is a change (uh, right?)
+        # quoting changes are changes
+        # freshness changes are changes, I guess
+        # metadata/tags changes are not "changes"
+        # patching/description changes are not "changes"
+        return (
+            self.same_database_representation(old)
+            and self.same_fqn(old)
+            and self.same_config(old)
+            and self.same_quoting(old)
+            and self.same_freshness(old)
+            and self.same_external(old)
+            and True
+        )
+
+    def get_full_source_name(self):
+        return f"{self.source_name}_{self.name}"
+
+    def get_source_representation(self):
+        return f'source("{self.source.name}", "{self.table.name}")'
+
+    @property
+    def is_refable(self):
+        return False
+
+    @property
+    def is_ephemeral(self):
+        return False
 
     @property
     def is_ephemeral_model(self):
@@ -517,6 +713,10 @@ class ParsedSourceDefinition(
         return []
 
     @property
+    def depends_on(self):
+        return DependsOn(macros=[], nodes=[])
+
+    @property
     def refs(self):
         return []
 
@@ -525,28 +725,167 @@ class ParsedSourceDefinition(
         return []
 
     @property
-    def tags(self):
-        return []
-
-    @property
     def has_freshness(self):
         return bool(self.freshness) and self.loaded_at_field is not None
 
+    @property
+    def search_name(self):
+        return f"{self.source_name}.{self.name}"
 
-ParsedResource = Union[
-    ParsedMacro, ParsedNode, ParsedDocumentation, ParsedSourceDefinition
+
+@dataclass
+class ParsedExposure(UnparsedBaseNode, HasUniqueID, HasFqn):
+    name: str
+    type: ExposureType
+    owner: ExposureOwner
+    resource_type: NodeType = NodeType.Exposure
+    description: str = ""
+    maturity: Optional[MaturityType] = None
+    meta: Dict[str, Any] = field(default_factory=dict)
+    tags: List[str] = field(default_factory=list)
+    url: Optional[str] = None
+    depends_on: DependsOn = field(default_factory=DependsOn)
+    refs: List[List[str]] = field(default_factory=list)
+    sources: List[List[str]] = field(default_factory=list)
+    created_at: float = field(default_factory=lambda: time.time())
+
+    @property
+    def depends_on_nodes(self):
+        return self.depends_on.nodes
+
+    @property
+    def search_name(self):
+        return self.name
+
+    def same_depends_on(self, old: "ParsedExposure") -> bool:
+        return set(self.depends_on.nodes) == set(old.depends_on.nodes)
+
+    def same_description(self, old: "ParsedExposure") -> bool:
+        return self.description == old.description
+
+    def same_maturity(self, old: "ParsedExposure") -> bool:
+        return self.maturity == old.maturity
+
+    def same_owner(self, old: "ParsedExposure") -> bool:
+        return self.owner == old.owner
+
+    def same_exposure_type(self, old: "ParsedExposure") -> bool:
+        return self.type == old.type
+
+    def same_url(self, old: "ParsedExposure") -> bool:
+        return self.url == old.url
+
+    def same_contents(self, old: Optional["ParsedExposure"]) -> bool:
+        # existing when it didn't before is a change!
+        # metadata/tags changes are not "changes"
+        if old is None:
+            return True
+
+        return (
+            self.same_fqn(old)
+            and self.same_exposure_type(old)
+            and self.same_owner(old)
+            and self.same_maturity(old)
+            and self.same_url(old)
+            and self.same_description(old)
+            and self.same_depends_on(old)
+            and True
+        )
+
+
+@dataclass
+class ParsedMetric(UnparsedBaseNode, HasUniqueID, HasFqn):
+    model: str
+    name: str
+    description: str
+    label: str
+    type: str
+    sql: Optional[str]
+    timestamp: Optional[str]
+    filters: List[MetricFilter]
+    time_grains: List[str]
+    dimensions: List[str]
+    resource_type: NodeType = NodeType.Metric
+    meta: Dict[str, Any] = field(default_factory=dict)
+    tags: List[str] = field(default_factory=list)
+    sources: List[List[str]] = field(default_factory=list)
+    depends_on: DependsOn = field(default_factory=DependsOn)
+    refs: List[List[str]] = field(default_factory=list)
+    created_at: float = field(default_factory=lambda: time.time())
+
+    @property
+    def depends_on_nodes(self):
+        return self.depends_on.nodes
+
+    @property
+    def search_name(self):
+        return self.name
+
+    def same_model(self, old: "ParsedMetric") -> bool:
+        return self.model == old.model
+
+    def same_dimensions(self, old: "ParsedMetric") -> bool:
+        return self.dimensions == old.dimensions
+
+    def same_filters(self, old: "ParsedMetric") -> bool:
+        return self.filters == old.filters
+
+    def same_description(self, old: "ParsedMetric") -> bool:
+        return self.description == old.description
+
+    def same_label(self, old: "ParsedMetric") -> bool:
+        return self.label == old.label
+
+    def same_type(self, old: "ParsedMetric") -> bool:
+        return self.type == old.type
+
+    def same_sql(self, old: "ParsedMetric") -> bool:
+        return self.sql == old.sql
+
+    def same_timestamp(self, old: "ParsedMetric") -> bool:
+        return self.timestamp == old.timestamp
+
+    def same_time_grains(self, old: "ParsedMetric") -> bool:
+        return self.time_grains == old.time_grains
+
+    def same_contents(self, old: Optional["ParsedMetric"]) -> bool:
+        # existing when it didn't before is a change!
+        # metadata/tags changes are not "changes"
+        if old is None:
+            return True
+
+        return (
+            self.same_model(old)
+            and self.same_dimensions(old)
+            and self.same_filters(old)
+            and self.same_description(old)
+            and self.same_label(old)
+            and self.same_type(old)
+            and self.same_sql(old)
+            and self.same_timestamp(old)
+            and self.same_time_grains(old)
+            and True
+        )
+
+
+ManifestNodes = Union[
+    ParsedAnalysisNode,
+    ParsedSingularTestNode,
+    ParsedHookNode,
+    ParsedModelNode,
+    ParsedRPCNode,
+    ParsedSqlNode,
+    ParsedGenericTestNode,
+    ParsedSeedNode,
+    ParsedSnapshotNode,
 ]
 
 
-PARSED_TYPES: Dict[NodeType, Type[ParsedResource]] = {
-    NodeType.Analysis: ParsedAnalysisNode,
-    NodeType.Documentation: ParsedDocumentation,
-    NodeType.Macro: ParsedMacro,
-    NodeType.Model: ParsedModelNode,
-    NodeType.Operation: ParsedHookNode,
-    NodeType.RPCCall: ParsedRPCNode,
-    NodeType.Seed: ParsedSeedNode,
-    NodeType.Snapshot: ParsedSnapshotNode,
-    NodeType.Source: ParsedSourceDefinition,
-    NodeType.Test: ParsedTestNode,
-}
+ParsedResource = Union[
+    ParsedDocumentation,
+    ParsedMacro,
+    ParsedNode,
+    ParsedExposure,
+    ParsedMetric,
+    ParsedSourceDefinition,
+]

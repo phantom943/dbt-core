@@ -9,7 +9,6 @@ from dbt.task import generate
 
 class GenerateTest(unittest.TestCase):
     def setUp(self):
-        dbt.flags.STRICT_MODE = True
         self.maxDiff = None
         self.manifest = mock.MagicMock()
         self.patcher = mock.patch('dbt.task.generate.get_unique_id_mapping')
@@ -20,15 +19,17 @@ class GenerateTest(unittest.TestCase):
 
     def map_uids(self, effects):
         results = {
-            generate.CatalogKey(db, sch, tbl): [uid]
+            generate.CatalogKey(db, sch, tbl): uid
             for db, sch, tbl, uid in effects
         }
-        self.mock_get_unique_id_mapping.return_value = results
+        self.mock_get_unique_id_mapping.return_value = results, {}
 
     def generate_catalog_dict(self, columns):
+        nodes, sources = generate.Catalog(columns).make_unique_id_map(self.manifest)
         result = generate.CatalogResults(
-            nodes=generate.Catalog(columns).make_unique_id_map(self.manifest),
-            generated_at=datetime.utcnow(),
+            nodes=nodes,
+            sources=sources,
+            errors=None,
         )
         return result.to_dict(omit_none=False)['nodes']
 

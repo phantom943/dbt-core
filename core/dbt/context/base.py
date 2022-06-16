@@ -1,90 +1,174 @@
-import itertools
 import json
 import os
-from typing import Callable, Any, Dict, List, Optional
+from typing import Any, Dict, NoReturn, Optional, Mapping, Iterable, Set
 
-import dbt.tracking
-from dbt.clients.jinja import undefined_error
-from dbt.contracts.graph.parsed import ParsedMacro
-from dbt.exceptions import MacroReturn, raise_compiler_error
-from dbt.include.global_project import PACKAGES
-from dbt.include.global_project import PROJECT_NAME as GLOBAL_PROJECT_NAME
-from dbt.logger import GLOBAL_LOGGER as logger
+from dbt import flags
+from dbt import tracking
+from dbt.clients.jinja import get_rendered
+from dbt.clients.yaml_helper import yaml, safe_load, SafeLoader, Loader, Dumper  # noqa: F401
+from dbt.contracts.graph.compiled import CompiledResource
+from dbt.exceptions import (
+    CompilationException,
+    MacroReturn,
+    raise_compiler_error,
+    raise_parsing_error,
+    disallow_secret_env_var,
+)
+from dbt.logger import SECRET_ENV_PREFIX
+from dbt.events.functions import fire_event, get_invocation_id
+from dbt.events.types import MacroEventInfo, MacroEventDebug
 from dbt.version import __version__ as dbt_version
-
-from dbt.node_types import NodeType
-
 
 # These modules are added to the context. Consider alternative
 # approaches which will extend well to potentially many modules
 import pytz
 import datetime
+import re
+import itertools
+
+# See the `contexts` module README for more information on how contexts work
 
 
-def env_var(var, default=None):
-    if var in os.environ:
-        return os.environ[var]
-    elif default is not None:
-        return default
-    else:
-        msg = "Env var required but not provided: '{}'".format(var)
-        undefined_error(msg)
+def get_pytz_module_context() -> Dict[str, Any]:
+    context_exports = pytz.__all__  # type: ignore
+
+    return {name: getattr(pytz, name) for name in context_exports}
 
 
-def debug_here():
-    import sys
-    import ipdb  # type: ignore
-    frame = sys._getframe(3)
-    ipdb.set_trace(frame)
+def get_datetime_module_context() -> Dict[str, Any]:
+    context_exports = ["date", "datetime", "time", "timedelta", "tzinfo"]
+
+    return {name: getattr(datetime, name) for name in context_exports}
+
+
+def get_re_module_context() -> Dict[str, Any]:
+    # TODO CT-211
+    context_exports = re.__all__  # type: ignore[attr-defined]
+
+    return {name: getattr(re, name) for name in context_exports}
+
+
+def get_itertools_module_context() -> Dict[str, Any]:
+    # Excluded dropwhile, filterfalse, takewhile and groupby;
+    # first 3 illogical for Jinja and last redundant.
+    context_exports = [
+        "count",
+        "cycle",
+        "repeat",
+        "accumulate",
+        "chain",
+        "compress",
+        "islice",
+        "starmap",
+        "tee",
+        "zip_longest",
+        "product",
+        "permutations",
+        "combinations",
+        "combinations_with_replacement",
+    ]
+
+    return {name: getattr(itertools, name) for name in context_exports}
+
+
+def get_context_modules() -> Dict[str, Dict[str, Any]]:
+    return {
+        "pytz": get_pytz_module_context(),
+        "datetime": get_datetime_module_context(),
+        "re": get_re_module_context(),
+        "itertools": get_itertools_module_context(),
+    }
+
+
+class ContextMember:
+    def __init__(self, value, name=None):
+        self.name = name
+        self.inner = value
+
+    def key(self, default):
+        if self.name is None:
+            return default
+        return self.name
+
+
+def contextmember(value):
+    if isinstance(value, str):
+        return lambda v: ContextMember(v, name=value)
+    return ContextMember(value)
+
+
+def contextproperty(value):
+    if isinstance(value, str):
+        return lambda v: ContextMember(property(v), name=value)
+    return ContextMember(property(value))
+
+
+class ContextMeta(type):
+    def __new__(mcls, name, bases, dct):
+        context_members = {}
+        context_attrs = {}
+        new_dct = {}
+
+        for base in bases:
+            context_members.update(getattr(base, "_context_members_", {}))
+            context_attrs.update(getattr(base, "_context_attrs_", {}))
+
+        for key, value in dct.items():
+            if isinstance(value, ContextMember):
+                context_key = value.key(key)
+                context_members[context_key] = value.inner
+                context_attrs[context_key] = key
+                value = value.inner
+            new_dct[key] = value
+        new_dct["_context_members_"] = context_members
+        new_dct["_context_attrs_"] = context_attrs
+        return type.__new__(mcls, name, bases, new_dct)
 
 
 class Var:
-    UndefinedVarError = "Required var '{}' not found in config:\nVars "\
-                        "supplied to {} = {}"
+    UndefinedVarError = "Required var '{}' not found in config:\nVars " "supplied to {} = {}"
     _VAR_NOTSET = object()
 
-    def __init__(self, model, context, overrides):
-        self.model = model
-        self.context = context
+    def __init__(
+        self,
+        context: Mapping[str, Any],
+        cli_vars: Mapping[str, Any],
+        node: Optional[CompiledResource] = None,
+    ) -> None:
+        self._context: Mapping[str, Any] = context
+        self._cli_vars: Mapping[str, Any] = cli_vars
+        self._node: Optional[CompiledResource] = node
+        self._merged: Mapping[str, Any] = self._generate_merged()
 
-        # These are hard-overrides (eg. CLI vars) that should take
-        # precedence over context-based var definitions
-        self.overrides = overrides
+    def _generate_merged(self) -> Mapping[str, Any]:
+        return self._cli_vars
 
-        if model is None:
-            # during config parsing we have no model and no local vars
-            self.model_name = '<Configuration>'
-            local_vars = {}
+    @property
+    def node_name(self):
+        if self._node is not None:
+            return self._node.name
         else:
-            self.model_name = model.name
-            local_vars = model.local_vars()
-
-        self.local_vars = dbt.utils.merge(local_vars, overrides)
-
-    def pretty_dict(self, data):
-        return json.dumps(data, sort_keys=True, indent=4)
+            return "<Configuration>"
 
     def get_missing_var(self, var_name):
-        pretty_vars = self.pretty_dict(self.local_vars)
-        msg = self.UndefinedVarError.format(
-            var_name, self.model_name, pretty_vars
-        )
-        raise_compiler_error(msg, self.model)
+        dct = {k: self._merged[k] for k in self._merged}
+        pretty_vars = json.dumps(dct, sort_keys=True, indent=4)
+        msg = self.UndefinedVarError.format(var_name, self.node_name, pretty_vars)
+        raise_compiler_error(msg, self._node)
 
-    def assert_var_defined(self, var_name, default):
-        if var_name not in self.local_vars and default is self._VAR_NOTSET:
-            return self.get_missing_var(var_name)
+    def has_var(self, var_name: str):
+        return var_name in self._merged
 
     def get_rendered_var(self, var_name):
-        raw = self.local_vars[var_name]
+        raw = self._merged[var_name]
         # if bool/int/float/etc are passed in, don't compile anything
         if not isinstance(raw, str):
             return raw
 
-        return dbt.clients.jinja.get_rendered(raw, self.context)
+        return get_rendered(raw, self._context)
 
     def __call__(self, var_name, default=_VAR_NOTSET):
-        if var_name in self.local_vars:
+        if self.has_var(var_name):
             return self.get_rendered_var(var_name)
         elif default is not self._VAR_NOTSET:
             return default
@@ -92,180 +176,489 @@ class Var:
             return self.get_missing_var(var_name)
 
 
-def get_pytz_module_context() -> Dict[str, Any]:
-    context_exports = pytz.__all__  # type: ignore
-
-    return {
-        name: getattr(pytz, name) for name in context_exports
-    }
-
-
-def get_datetime_module_context() -> Dict[str, Any]:
-    context_exports = [
-        'date',
-        'datetime',
-        'time',
-        'timedelta',
-        'tzinfo'
-    ]
-
-    return {
-        name: getattr(datetime, name) for name in context_exports
-    }
-
-
-def get_context_modules() -> Dict[str, Dict[str, Any]]:
-    return {
-        'pytz': get_pytz_module_context(),
-        'datetime': get_datetime_module_context(),
-    }
-
-
-def _return(value):
-    raise MacroReturn(value)
-
-
-def fromjson(string, default=None):
-    try:
-        return json.loads(string)
-    except ValueError:
-        return default
-
-
-def tojson(value, default=None, sort_keys=False):
-    try:
-        return json.dumps(value, sort_keys=sort_keys)
-    except ValueError:
-        return default
-
-
-def log(msg, info=False):
-    if info:
-        logger.info(msg)
-    else:
-        logger.debug(msg)
-    return ''
-
-
-class BaseContext:
-    def to_dict(self) -> Dict[str, Any]:
-        run_started_at = None
-        invocation_id = None
-
-        if dbt.tracking.active_user is not None:
-            run_started_at = dbt.tracking.active_user.run_started_at
-            invocation_id = dbt.tracking.active_user.invocation_id
-
-        context: Dict[str, Any] = {
-            'env_var': env_var,
-            'modules': get_context_modules(),
-            'run_started_at': run_started_at,
-            'invocation_id': invocation_id,
-            'return': _return,
-            'fromjson': fromjson,
-            'tojson': tojson,
-            'log': log,
-        }
-        if os.environ.get('DBT_MACRO_DEBUGGING'):
-            context['debug'] = debug_here
-        return context
-
-
-class ConfigRenderContext(BaseContext):
+class BaseContext(metaclass=ContextMeta):
+    # subclass is TargetContext
     def __init__(self, cli_vars):
+        self._ctx = {}
         self.cli_vars = cli_vars
+        self.env_vars = {}
 
-    def make_var(self, context) -> Var:
-        return Var(None, context, self.cli_vars)
+    def generate_builtins(self):
+        builtins: Dict[str, Any] = {}
+        for key, value in self._context_members_.items():
+            if hasattr(value, "__get__"):
+                # handle properties, bound methods, etc
+                value = value.__get__(self)
+            builtins[key] = value
+        return builtins
 
-    def to_dict(self) -> Dict[str, Any]:
-        context = super().to_dict()
-        context['var'] = self.make_var(context)
-        return context
+    # no dbtClassMixin so this is not an actual override
+    def to_dict(self):
+        self._ctx["context"] = self._ctx
+        builtins = self.generate_builtins()
+        self._ctx["builtins"] = builtins
+        self._ctx.update(builtins)
+        return self._ctx
 
+    @contextproperty
+    def dbt_version(self) -> str:
+        """The `dbt_version` variable returns the installed version of dbt that
+        is currently running. It can be used for debugging or auditing
+        purposes.
 
-def _add_macro_map(
-    context: Dict[str, Any], package_name: str, macro_map: Dict[str, Callable]
-):
-    """Update an existing context in-place, adding the given macro map to the
-    appropriate package namespace. Adapter packages get inserted into the
-    global namespace.
-    """
-    key = package_name
-    if package_name in PACKAGES:
-        key = GLOBAL_PROJECT_NAME
-    if key not in context:
-        value: Dict[str, Callable] = {}
-        context[key] = value
+        > macros/get_version.sql
 
-    context[key].update(macro_map)
+            {% macro get_version() %}
+              {% set msg = "The installed version of dbt is: " ~ dbt_version %}
+              {% do log(msg, info=true) %}
+            {% endmacro %}
 
+        Example output:
 
-class HasCredentialsContext(ConfigRenderContext):
-    def __init__(self, config):
-        # sometimes we only have a profile object and end up here. In those
-        # cases, we never want the actual cli vars passed, so we can do this.
-        cli_vars = getattr(config, 'cli_vars', {})
-        super().__init__(cli_vars=cli_vars)
-        self.config = config
+            $ dbt run-operation get_version
+            The installed version of dbt is 0.16.0
+        """
+        return dbt_version
 
-    def get_target(self) -> Dict[str, Any]:
-        target = dict(
-            self.config.credentials.connection_info(with_aliases=True)
-        )
-        target.update({
-            'type': self.config.credentials.type,
-            'threads': self.config.threads,
-            'name': self.config.target_name,
-            # not specified, but present for compatibility
-            'target_name': self.config.target_name,
-            'profile_name': self.config.profile_name,
-            'config': self.config.config.to_dict(),
-        })
-        return target
+    @contextproperty
+    def var(self) -> Var:
+        """Variables can be passed from your `dbt_project.yml` file into models
+        during compilation. These variables are useful for configuring packages
+        for deployment in multiple environments, or defining values that should
+        be used across multiple models within a package.
 
-    @property
-    def search_package_name(self):
-        return self.config.project_name
+        To add a variable to a model, use the `var()` function:
 
-    def add_macros_from(
-        self,
-        context: Dict[str, Any],
-        macros: Dict[str, ParsedMacro],
-    ):
-        global_macros: List[Dict[str, Callable]] = []
-        local_macros: List[Dict[str, Callable]] = []
+        > my_model.sql:
 
-        for unique_id, macro in macros.items():
-            if macro.resource_type != NodeType.Macro:
-                continue
-            package_name = macro.package_name
+            select * from events where event_type = '{{ var("event_type") }}'
 
-            macro_map: Dict[str, Callable] = {
-                macro.name: macro.generator(context)
+        If you try to run this model without supplying an `event_type`
+        variable, you'll receive a compilation error that looks like this:
+
+            Encountered an error:
+            ! Compilation error while compiling model package_name.my_model:
+            ! Required var 'event_type' not found in config:
+            Vars supplied to package_name.my_model = {
             }
 
-            # adapter packages are part of the global project space
-            _add_macro_map(context, package_name, macro_map)
+        To supply a variable to a given model, add one or more `vars`
+        dictionaries to the `models` config in your `dbt_project.yml` file.
+        These `vars` are in-scope for all models at or below where they are
+        defined, so place them where they make the most sense. Below are three
+        different placements of the `vars` dict, all of which will make the
+        `my_model` model compile.
 
-            if package_name == self.search_package_name:
-                local_macros.append(macro_map)
-            elif package_name in PACKAGES:
-                global_macros.append(macro_map)
+        > dbt_project.yml:
 
-        # Load global macros before local macros -- local takes precedence
-        for macro_map in itertools.chain(global_macros, local_macros):
-            context.update(macro_map)
+            # 1) scoped at the model level
+            models:
+              package_name:
+                my_model:
+                  materialized: view
+                  vars:
+                    event_type: activation
+            # 2) scoped at the package level
+            models:
+              package_name:
+                vars:
+                  event_type: activation
+                my_model:
+                  materialized: view
+            # 3) scoped globally
+            models:
+              vars:
+                event_type: activation
+              package_name:
+                my_model:
+                  materialized: view
+
+        ## Variable default values
+
+        The `var()` function takes an optional second argument, `default`. If
+        this argument is provided, then it will be the default value for the
+        variable if one is not explicitly defined.
+
+        > my_model.sql:
+
+            -- Use 'activation' as the event_type if the variable is not
+            -- defined.
+            select *
+            from events
+            where event_type = '{{ var("event_type", "activation") }}'
+        """
+        return Var(self._ctx, self.cli_vars)
+
+    @contextmember
+    def env_var(self, var: str, default: Optional[str] = None) -> str:
+        """The env_var() function. Return the environment variable named 'var'.
+        If there is no such environment variable set, return the default.
+
+        If the default is None, raise an exception for an undefined variable.
+        """
+        return_value = None
+        if var.startswith(SECRET_ENV_PREFIX):
+            disallow_secret_env_var(var)
+        if var in os.environ:
+            return_value = os.environ[var]
+        elif default is not None:
+            return_value = default
+
+        if return_value is not None:
+            self.env_vars[var] = return_value
+            return return_value
+        else:
+            msg = f"Env var required but not provided: '{var}'"
+            raise_parsing_error(msg)
+
+    if os.environ.get("DBT_MACRO_DEBUGGING"):
+
+        @contextmember
+        @staticmethod
+        def debug():
+            """Enter a debugger at this line in the compiled jinja code."""
+            import sys
+            import ipdb  # type: ignore
+
+            frame = sys._getframe(3)
+            ipdb.set_trace(frame)
+            return ""
+
+    @contextmember("return")
+    @staticmethod
+    def _return(data: Any) -> NoReturn:
+        """The `return` function can be used in macros to return data to the
+        caller. The type of the data (`dict`, `list`, `int`, etc) will be
+        preserved through the return call.
+
+        :param data: The data to return to the caller
 
 
-class QueryHeaderContext(HasCredentialsContext):
-    def __init__(self, config):
-        super().__init__(config)
+        > macros/example.sql:
 
-    def to_dict(self, macros: Optional[Dict[str, ParsedMacro]] = None):
-        context = super().to_dict()
-        context['target'] = self.get_target()
-        context['dbt_version'] = dbt_version
-        if macros is not None:
-            self.add_macros_from(context, macros)
-        return context
+            {% macro get_data() %}
+              {{ return([1,2,3]) }}
+            {% endmacro %}
+
+        > models/my_model.sql:
+
+            select
+              -- getdata() returns a list!
+              {% for i in getdata() %}
+                {{ i }}
+                {% if not loop.last %},{% endif %}
+              {% endfor %}
+
+        """
+        raise MacroReturn(data)
+
+    @contextmember
+    @staticmethod
+    def fromjson(string: str, default: Any = None) -> Any:
+        """The `fromjson` context method can be used to deserialize a json
+        string into a Python object primitive, eg. a `dict` or `list`.
+
+        :param value: The json string to deserialize
+        :param default: A default value to return if the `string` argument
+            cannot be deserialized (optional)
+
+        Usage:
+
+            {% set my_json_str = '{"abc": 123}' %}
+            {% set my_dict = fromjson(my_json_str) %}
+            {% do log(my_dict['abc']) %}
+        """
+        try:
+            return json.loads(string)
+        except ValueError:
+            return default
+
+    @contextmember
+    @staticmethod
+    def tojson(value: Any, default: Any = None, sort_keys: bool = False) -> Any:
+        """The `tojson` context method can be used to serialize a Python
+        object primitive, eg. a `dict` or `list` to a json string.
+
+        :param value: The value serialize to json
+        :param default: A default value to return if the `value` argument
+            cannot be serialized
+        :param sort_keys: If True, sort the keys.
+
+
+        Usage:
+
+            {% set my_dict = {"abc": 123} %}
+            {% set my_json_string = tojson(my_dict) %}
+            {% do log(my_json_string) %}
+        """
+        try:
+            return json.dumps(value, sort_keys=sort_keys)
+        except ValueError:
+            return default
+
+    @contextmember
+    @staticmethod
+    def fromyaml(value: str, default: Any = None) -> Any:
+        """The fromyaml context method can be used to deserialize a yaml string
+        into a Python object primitive, eg. a `dict` or `list`.
+
+        :param value: The yaml string to deserialize
+        :param default: A default value to return if the `string` argument
+            cannot be deserialized (optional)
+
+        Usage:
+
+            {% set my_yml_str -%}
+            dogs:
+             - good
+             - bad
+            {%- endset %}
+            {% set my_dict = fromyaml(my_yml_str) %}
+            {% do log(my_dict['dogs'], info=true) %}
+            -- ["good", "bad"]
+            {% do my_dict['dogs'].pop() }
+            {% do log(my_dict['dogs'], info=true) %}
+            -- ["good"]
+        """
+        try:
+            return safe_load(value)
+        except (AttributeError, ValueError, yaml.YAMLError):
+            return default
+
+    # safe_dump defaults to sort_keys=True, but we act like json.dumps (the
+    # opposite)
+    @contextmember
+    @staticmethod
+    def toyaml(
+        value: Any, default: Optional[str] = None, sort_keys: bool = False
+    ) -> Optional[str]:
+        """The `tojson` context method can be used to serialize a Python
+        object primitive, eg. a `dict` or `list` to a yaml string.
+
+        :param value: The value serialize to yaml
+        :param default: A default value to return if the `value` argument
+            cannot be serialized
+        :param sort_keys: If True, sort the keys.
+
+
+        Usage:
+
+            {% set my_dict = {"abc": 123} %}
+            {% set my_yaml_string = toyaml(my_dict) %}
+            {% do log(my_yaml_string) %}
+        """
+        try:
+            return yaml.safe_dump(data=value, sort_keys=sort_keys)
+        except (ValueError, yaml.YAMLError):
+            return default
+
+    @contextmember("set")
+    @staticmethod
+    def _set(value: Iterable[Any], default: Any = None) -> Optional[Set[Any]]:
+        """The `set` context method can be used to convert any iterable
+        to a sequence of iterable elements that are unique (a set).
+
+        :param value: The iterable
+        :param default: A default value to return if the `value` argument
+            is not an iterable
+
+        Usage:
+            {% set my_list = [1, 2, 2, 3] %}
+            {% set my_set = set(my_list) %}
+            {% do log(my_set) %}  {# {1, 2, 3} #}
+        """
+        try:
+            return set(value)
+        except TypeError:
+            return default
+
+    @contextmember
+    @staticmethod
+    def try_set(value: Iterable[Any]) -> Set[Any]:
+        """The `try_set` context method can be used to convert any iterable
+        to a sequence of iterable elements that are unique (a set). The
+        difference to the `set` context method is that the `try_set` method
+        will raise an exception on a TypeError.
+
+        :param value: The iterable
+        :param default: A default value to return if the `value` argument
+            is not an iterable
+
+        Usage:
+            {% set my_list = [1, 2, 2, 3] %}
+            {% set my_set = try_set(my_list) %}
+            {% do log(my_set) %}  {# {1, 2, 3} #}
+        """
+        try:
+            return set(value)
+        except TypeError as e:
+            raise CompilationException(e)
+
+    @contextmember("zip")
+    @staticmethod
+    def _zip(*args: Iterable[Any], default: Any = None) -> Optional[Iterable[Any]]:
+        """The `try_zip` context method can be used to used to return
+        an iterator of tuples, where the i-th tuple contains the i-th
+        element from each of the argument iterables.
+
+        :param *args: Any number of iterables
+        :param default: A default value to return if `*args` is not
+            iterable
+
+        Usage:
+            {% set my_list_a = [1, 2] %}
+            {% set my_list_b = ['alice', 'bob'] %}
+            {% set my_zip = zip(my_list_a, my_list_b) | list %}
+            {% do log(my_set) %}  {# [(1, 'alice'), (2, 'bob')] #}
+        """
+        try:
+            return zip(*args)
+        except TypeError:
+            return default
+
+    @contextmember
+    @staticmethod
+    def try_zip(*args: Iterable[Any]) -> Iterable[Any]:
+        """The `try_zip` context method can be used to used to return
+        an iterator of tuples, where the i-th tuple contains the i-th
+        element from each of the argument iterables. The difference to the
+        `zip` context method is that the `try_zip` method will raise an
+        exception on a TypeError.
+
+        :param *args: Any number of iterables
+        :param default: A default value to return if `*args` is not
+            iterable
+
+        Usage:
+            {% set my_list_a = [1, 2] %}
+            {% set my_list_b = ['alice', 'bob'] %}
+            {% set my_zip = try_zip(my_list_a, my_list_b) | list %}
+            {% do log(my_set) %}  {# [(1, 'alice'), (2, 'bob')] #}
+        """
+        try:
+            return zip(*args)
+        except TypeError as e:
+            raise CompilationException(e)
+
+    @contextmember
+    @staticmethod
+    def log(msg: str, info: bool = False) -> str:
+        """Logs a line to either the log file or stdout.
+
+        :param msg: The message to log
+        :param info: If `False`, write to the log file. If `True`, write to
+            both the log file and stdout.
+
+        > macros/my_log_macro.sql
+
+            {% macro some_macro(arg1, arg2) %}
+              {{ log("Running some_macro: " ~ arg1 ~ ", " ~ arg2) }}
+            {% endmacro %}"
+        """
+        if info:
+            fire_event(MacroEventInfo(msg=msg))
+        else:
+            fire_event(MacroEventDebug(msg=msg))
+        return ""
+
+    @contextproperty
+    def run_started_at(self) -> Optional[datetime.datetime]:
+        """`run_started_at` outputs the timestamp that this run started, e.g.
+        `2017-04-21 01:23:45.678`. The `run_started_at` variable is a Python
+        `datetime` object. As of 0.9.1, the timezone of this variable defaults
+        to UTC.
+
+        > run_started_at_example.sql
+
+            select
+                '{{ run_started_at.strftime("%Y-%m-%d") }}' as date_day
+            from ...
+
+
+        To modify the timezone of this variable, use the the `pytz` module:
+
+        > run_started_at_utc.sql
+
+            {% set est = modules.pytz.timezone("America/New_York") %}
+            select
+                '{{ run_started_at.astimezone(est) }}' as run_started_est
+            from ...
+        """
+        if tracking.active_user is not None:
+            return tracking.active_user.run_started_at
+        else:
+            return None
+
+    @contextproperty
+    def invocation_id(self) -> Optional[str]:
+        """invocation_id outputs a UUID generated for this dbt run (useful for
+        auditing)
+        """
+        return get_invocation_id()
+
+    @contextproperty
+    def modules(self) -> Dict[str, Any]:
+        """The `modules` variable in the Jinja context contains useful Python
+        modules for operating on data.
+
+        # datetime
+
+        This variable is a pointer to the Python datetime module.
+
+        Usage:
+
+            {% set dt = modules.datetime.datetime.now() %}
+
+        # pytz
+
+        This variable is a pointer to the Python pytz module.
+
+        Usage:
+
+            {% set dt = modules.datetime.datetime(2002, 10, 27, 6, 0, 0) %}
+            {% set dt_local = modules.pytz.timezone('US/Eastern').localize(dt) %}
+            {{ dt_local }}
+        """  # noqa
+        return get_context_modules()
+
+    @contextproperty
+    def flags(self) -> Any:
+        """The `flags` variable contains true/false values for flags provided
+        on the command line.
+
+        > flags.sql:
+
+            {% if flags.FULL_REFRESH %}
+            drop table ...
+            {% else %}
+            -- no-op
+            {% endif %}
+
+        This supports all flags defined in flags submodule (core/dbt/flags.py)
+        TODO: Replace with object that provides read-only access to flag values
+        """
+        return flags
+
+    @contextmember
+    @staticmethod
+    def print(msg: str) -> str:
+        """Prints a line to stdout.
+
+        :param msg: The message to print
+
+        > macros/my_log_macro.sql
+
+            {% macro some_macro(arg1, arg2) %}
+              {{ print("Running some_macro: " ~ arg1 ~ ", " ~ arg2) }}
+            {% endmacro %}"
+        """
+
+        if not flags.NO_PRINT:
+            print(msg)
+        return ""
+
+
+def generate_base_context(cli_vars: Dict[str, Any]) -> Dict[str, Any]:
+    ctx = BaseContext(cli_vars)
+    # This is not a Mashumaro to_dict call
+    return ctx.to_dict()

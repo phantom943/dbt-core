@@ -62,6 +62,7 @@ MODEL_POST_HOOK = """
    )
 """
 
+
 class BaseTestPrePost(DBTIntegrationTest):
     def setUp(self):
         DBTIntegrationTest.setUp(self)
@@ -119,6 +120,7 @@ class TestPrePostModelHooks(BaseTestPrePost):
     @property
     def project_config(self):
         return {
+            'config-version': 2,
             'macro-paths': ['macros'],
             'models': {
                 'test': {
@@ -129,14 +131,13 @@ class TestPrePostModelHooks(BaseTestPrePost):
                         # outside transaction (runs first)
                         {"sql": "vacuum {{ this.schema }}.on_model_hook", "transaction": False},
                     ],
-
                     'post-hook':[
                         # outside transaction (runs second)
                         {"sql": "vacuum {{ this.schema }}.on_model_hook", "transaction": False},
 
                         # inside transaction (runs first)
                         MODEL_POST_HOOK,
-                    ]
+                    ],
                 }
             }
         }
@@ -153,6 +154,46 @@ class TestPrePostModelHooks(BaseTestPrePost):
         self.check_hooks('end')
 
 
+class TestHookRefs(BaseTestPrePost):
+    @property
+    def project_config(self):
+        return {
+            'config-version': 2,
+            'models': {
+                'test': {
+                    'hooked': {
+                        'post-hook': ['''
+                        insert into {{this.schema}}.on_model_hook select
+                        state,
+                        '{{ target.dbname }}' as "target.dbname",
+                        '{{ target.host }}' as "target.host",
+                        '{{ target.name }}' as "target.name",
+                        '{{ target.schema }}' as "target.schema",
+                        '{{ target.type }}' as "target.type",
+                        '{{ target.user }}' as "target.user",
+                        '{{ target.get("pass", "") }}' as "target.pass",
+                        {{ target.port }} as "target.port",
+                        {{ target.threads }} as "target.threads",
+                        '{{ run_started_at }}' as "run_started_at",
+                        '{{ invocation_id }}' as "invocation_id"
+                    from {{ ref('post') }}'''.strip()],
+                    }
+                },
+            }
+        }
+
+    @property
+    def models(self):
+        return 'ref-hook-models'
+
+    @use_profile('postgres')
+    def test_postgres_pre_post_model_hooks_refed(self):
+        self.run_dbt(['run'])
+
+        self.check_hooks('start', count=1)
+        self.check_hooks('end', count=1)
+
+
 class TestPrePostModelHooksOnSeeds(DBTIntegrationTest):
     @property
     def schema(self):
@@ -165,7 +206,8 @@ class TestPrePostModelHooksOnSeeds(DBTIntegrationTest):
     @property
     def project_config(self):
         return {
-            'data-paths': ['data'],
+            'config-version': 2,
+            'seed-paths': ['seeds'],
             'models': {},
             'seeds': {
                 'post-hook': [
@@ -184,6 +226,40 @@ class TestPrePostModelHooksOnSeeds(DBTIntegrationTest):
         self.assertEqual(len(res), 1, 'Expected exactly one item')
 
 
+class TestPrePostModelHooksOnSeedsPlusPrefixed(TestPrePostModelHooksOnSeeds):
+    @property
+    def project_config(self):
+        return {
+            'config-version': 2,
+            'seed-paths': ['seeds'],
+            'models': {},
+            'seeds': {
+                '+post-hook': [
+                    'alter table {{ this }} add column new_col int',
+                    'update {{ this }} set new_col = 1'
+                ],
+                'quote_columns': False,
+            },
+        }
+
+
+class TestPrePostModelHooksOnSeedsPlusPrefixedWhitespace(TestPrePostModelHooksOnSeeds):
+    @property
+    def project_config(self):
+        return {
+            'config-version': 2,
+            'seed-paths': ['seeds'],
+            'models': {},
+            'seeds': {
+                '+ post-hook': [
+                    'alter table {{ this }} add column new_col int',
+                    'update {{ this }} set new_col = 1'
+                ],
+                'quote_columns': False,
+            },
+        }
+
+
 class TestPrePostModelHooksOnSnapshots(DBTIntegrationTest):
     @property
     def schema(self):
@@ -196,7 +272,8 @@ class TestPrePostModelHooksOnSnapshots(DBTIntegrationTest):
     @property
     def project_config(self):
         return {
-            'data-paths': ['data'],
+            'config-version': 2,
+            'seed-paths': ['seeds'],
             'snapshot-paths': ['test-snapshots'],
             'models': {},
             'snapshots': {
@@ -224,6 +301,7 @@ class TestPrePostModelHooksInConfig(BaseTestPrePost):
     @property
     def project_config(self):
         return {
+            'config-version': 2,
             'macro-paths': ['macros'],
         }
 
@@ -241,23 +319,21 @@ class TestPrePostModelHooksInConfig(BaseTestPrePost):
     @use_profile('postgres')
     def test_postgres_pre_and_post_model_hooks_model_and_project(self):
         self.use_default_project({
+            'config-version': 2,
             'models': {
                 'test': {
                     'pre-hook': [
                         # inside transaction (runs second)
                         MODEL_PRE_HOOK,
-
                         # outside transaction (runs first)
                         {"sql": "vacuum {{ this.schema }}.on_model_hook", "transaction": False},
                     ],
-
                     'post-hook':[
                         # outside transaction (runs second)
                         {"sql": "vacuum {{ this.schema }}.on_model_hook", "transaction": False},
-
                         # inside transaction (runs first)
                         MODEL_POST_HOOK,
-                    ]
+                    ],
                 }
             }
         })
@@ -281,7 +357,8 @@ class TestPrePostSnapshotHooksInConfigKwargs(TestPrePostModelHooksOnSnapshots):
     @property
     def project_config(self):
         return {
-            'data-paths': ['data'],
+            'config-version': 2,
+            'seed-paths': ['seeds'],
             'snapshot-paths': ['test-kwargs-snapshots'],
             'models': {},
             'seeds': {

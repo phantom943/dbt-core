@@ -1,8 +1,9 @@
 from typing import Optional, Set, List, Dict, ClassVar
 
-import dbt.links
 import dbt.exceptions
-import dbt.flags
+from dbt import ui
+
+import dbt.tracking
 
 
 class DBTDeprecation:
@@ -13,102 +14,73 @@ class DBTDeprecation:
     def name(self) -> str:
         if self._name is not None:
             return self._name
-        raise NotImplementedError(
-            'name not implemented for {}'.format(self)
-        )
+        raise NotImplementedError("name not implemented for {}".format(self))
+
+    def track_deprecation_warn(self) -> None:
+        if dbt.tracking.active_user is not None:
+            dbt.tracking.track_deprecation_warn({"deprecation_name": self.name})
 
     @property
     def description(self) -> str:
         if self._description is not None:
             return self._description
-        raise NotImplementedError(
-            'description not implemented for {}'.format(self)
-        )
+        raise NotImplementedError("description not implemented for {}".format(self))
 
     def show(self, *args, **kwargs) -> None:
         if self.name not in active_deprecations:
             desc = self.description.format(**kwargs)
-            dbt.exceptions.warn_or_error(
-                "* Deprecation Warning: {}\n".format(desc)
-            )
+            msg = ui.line_wrap_message(desc, prefix="Deprecated functionality\n\n")
+            dbt.exceptions.warn_or_error(msg, log_fmt=ui.warning_tag("{}"))
+            self.track_deprecation_warn()
             active_deprecations.add(self.name)
 
 
-class DBTRepositoriesDeprecation(DBTDeprecation):
-    _name = "repositories"
-
-    _description = """
-    The dbt_project.yml configuration option 'repositories' is
-  deprecated. Please place dependencies in the `packages.yml` file instead.
-  The 'repositories' option will be removed in a future version of dbt.
-
-  For more information, see: https://docs.getdbt.com/docs/package-management
-
-  # Example packages.yml contents:
-
-{recommendation}
-  """.lstrip()
+class PackageRedirectDeprecation(DBTDeprecation):
+    _name = "package-redirect"
+    _description = """\
+    The `{old_name}` package is deprecated in favor of `{new_name}`. Please update
+    your `packages.yml` configuration to use `{new_name}` instead.
+    """
 
 
-class GenerateSchemaNameSingleArgDeprecated(DBTDeprecation):
-    _name = 'generate-schema-name-single-arg'
-
-    _description = '''As of dbt v0.14.0, the `generate_schema_name` macro
-  accepts a second "node" argument. The one-argument form of `generate_schema_name`
-  is deprecated, and will become unsupported in a future release.
-
-  For more information, see:
-    https://docs.getdbt.com/v0.14/docs/upgrading-to-014
-  '''  # noqa
+class PackageInstallPathDeprecation(DBTDeprecation):
+    _name = "install-packages-path"
+    _description = """\
+    The default package install path has changed from `dbt_modules` to `dbt_packages`.
+    Please update `clean-targets` in `dbt_project.yml` and check `.gitignore` as well.
+    Or, set `packages-install-path: dbt_modules` if you'd like to keep the current value.
+    """
 
 
-class MaterializationReturnDeprecation(DBTDeprecation):
-    _name = 'materialization-return'
-
-    _description = '''
-    The materialization ("{materialization}") did not explicitly return a list
-    of relations to add to the cache. By default the target relation will be
-    added, but this behavior will be removed in a future version of dbt.
-
-  For more information, see:
-  https://docs.getdbt.com/v0.15/docs/creating-new-materializations#section-6-returning-relations
-    '''.lstrip()
+class ConfigPathDeprecation(DBTDeprecation):
+    _description = """\
+    The `{deprecated_path}` config has been renamed to `{exp_path}`.
+    Please update your `dbt_project.yml` configuration to reflect this change.
+    """
 
 
-class NotADictionaryDeprecation(DBTDeprecation):
-    _name = 'not-a-dictionary'
-
-    _description = '''
-    The object ("{obj}") was used as a dictionary. In a future version of dbt
-    this capability will be removed from objects of this type.
-    '''.lstrip()
+class ConfigSourcePathDeprecation(ConfigPathDeprecation):
+    _name = "project-config-source-paths"
 
 
-class ColumnQuotingDeprecation(DBTDeprecation):
-    _name = 'column-quoting-unset'
-
-    _description = '''
-    The quote_columns parameter was not set for seeds, so the default value of
-    False was chosen. The default will change to True in a future release.
-
-    For more information, see:
-    https://docs.getdbt.com/v0.15/docs/seeds#section-specify-column-quoting
-    '''
+class ConfigDataPathDeprecation(ConfigPathDeprecation):
+    _name = "project-config-data-paths"
 
 
 _adapter_renamed_description = """\
 The adapter function `adapter.{old_name}` is deprecated and will be removed in
- a future release of dbt. Please use `adapter.{new_name}` instead.
- Documentation for {new_name} can be found here:
- https://docs.getdbt.com/docs/adapter"""
+a future release of dbt. Please use `adapter.{new_name}` instead.
+
+Documentation for {new_name} can be found here:
+
+    https://docs.getdbt.com/docs/adapter
+"""
 
 
 def renamed_method(old_name: str, new_name: str):
-
     class AdapterDeprecationWarning(DBTDeprecation):
-        _name = 'adapter:{}'.format(old_name)
-        _description = _adapter_renamed_description.format(old_name=old_name,
-                                                           new_name=new_name)
+        _name = "adapter:{}".format(old_name)
+        _description = _adapter_renamed_description.format(old_name=old_name, new_name=new_name)
 
     dep = AdapterDeprecationWarning()
     deprecations_list.append(dep)
@@ -118,9 +90,7 @@ def renamed_method(old_name: str, new_name: str):
 def warn(name, *args, **kwargs):
     if name not in deprecations:
         # this should (hopefully) never happen
-        raise RuntimeError(
-            "Error showing deprecation warning: {}".format(name)
-        )
+        raise RuntimeError("Error showing deprecation warning: {}".format(name))
 
     deprecations[name].show(*args, **kwargs)
 
@@ -131,16 +101,13 @@ def warn(name, *args, **kwargs):
 active_deprecations: Set[str] = set()
 
 deprecations_list: List[DBTDeprecation] = [
-    DBTRepositoriesDeprecation(),
-    GenerateSchemaNameSingleArgDeprecated(),
-    MaterializationReturnDeprecation(),
-    NotADictionaryDeprecation(),
-    ColumnQuotingDeprecation(),
+    ConfigSourcePathDeprecation(),
+    ConfigDataPathDeprecation(),
+    PackageInstallPathDeprecation(),
+    PackageRedirectDeprecation(),
 ]
 
-deprecations: Dict[str, DBTDeprecation] = {
-    d.name: d for d in deprecations_list
-}
+deprecations: Dict[str, DBTDeprecation] = {d.name: d for d in deprecations_list}
 
 
 def reset_deprecations():

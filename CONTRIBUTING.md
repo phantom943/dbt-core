@@ -1,194 +1,193 @@
-# Getting started with dbt
+# Contributing to `dbt-core`
+
+`dbt-core` is open source software. It is what it is today because community members have opened issues, provided feedback, and [contributed to the knowledge loop](https://www.getdbt.com/dbt-labs/values/). Whether you are a seasoned open source contributor or a first-time committer, we welcome and encourage you to contribute code, documentation, ideas, or problem statements to this project.
+
+1. [About this document](#about-this-document)
+2. [Getting the code](#getting-the-code)
+3. [Setting up an environment](#setting-up-an-environment)
+4. [Running `dbt` in development](#running-dbt-core-in-development)
+5. [Testing dbt-core](#testing)
+6. [Submitting a Pull Request](#submitting-a-pull-request)
 
 ## About this document
 
-This document is a guide intended for folks interested in contributing to dbt. It is not intended as a guide for end users of dbt (though if it is helpful, that's great!) and it assumes a certain level of familiarity with Python concepts such as virtualenvs, `pip`, python modules, filesystems, and so on. This guide also documents the process by which community-contributed Pull Requests can be incorporated into this repository. This guide assumes you are using macOS or Linux and are comfortable with the command line. If you get stuck while reading this guide, drop us a line in the #development channel on [slack](slack.getdbt.com).
+There are many ways to contribute to the ongoing development of `dbt-core`, such as by participating in discussions and issues. We encourage you to first read our higher-level document: ["Expectations for Open Source Contributors"](https://docs.getdbt.com/docs/contributing/oss-expectations).
 
-## Contributing a change
+The rest of this document serves as a more granular guide for contributing code changes to `dbt-core` (this repository). It is not intended as a guide for using `dbt-core`, and some pieces assume a level of familiarity with Python development (virtualenvs, `pip`, etc). Specific code snippets in this guide assume you are using macOS or Linux and are comfortable with the command line.
 
-dbt is Apache 2.0-licensed open source software. dbt is the software that it is today because community members like you have opened issues, provided feedback, and contributed to the knowledge loop for the entire communtiy. Whether you are a seasoned open source contributor or a first time committer, you are welcomed and encouraged to contribute code, documentation, ideas, or problem statements to this project.
+If you get stuck, we're happy to help! Drop us a line in the `#dbt-core-development` channel in the [dbt Community Slack](https://community.getdbt.com).
 
-### Defining the problem
+### Notes
 
-If you have an idea for a new feature or if you've discovered a bug in dbt, the first step is to open an issue. Please check the list of [open issues](https://github.com/fishtown-analytics/dbt/issues) before creating a new one. If you find a relevant issue, please add a comment to the open issue instead of creating a new one. There are hundreds of open issues in this repository and it can be hard to know where to look for a relevant open issue. **The dbt maintainers are always happy to point contributors in the right direction**, so please err on the side of documenting your idea in a new issue if you are unsure where a problem statement belongs.
-
-**Note:** All community-contributed Pull Requests _must_ be associated with an open issue. If you submit a Pull Request that does not pertain to an open issue, you will be asked to create an issue describing the problem before the Pull Request can be reviewed.
-
-### Discussing the idea
-
-After creating an issue, a dbt maintainer will follow up with you to explore your idea further and advise on how to implement the suggested changes. In many cases, community members will chime in with their own thoughts on the problem statement. If you as the issue creator are interested in submitting a Pull Request to address the issue, you should indicate this in the body of the issue. The dbt maintainers are _always_ happy to help contributors with the implementation of fixes and features, so please also indicate if there's anything you're unsure about or could use guidance around in the issue.
-
-### Submitting a change
-
-If the issue is appropriately well-scoped and describes a beneficial change to the dbt codebase, then anyone may submit a Pull Request to implement the functionality described in the issue (see the sections below on how to do this).
-
-In some cases, the right resolution to an open issue might be tangential to the dbt codebase. The right path forward might be a documentation update or a change that can be made in user-space. In other cases, the issue might describe functionality that the dbt maintainers are unwilling or unable to incorporate into the dbt codebase. When it is determined that an open issue describes functionality that will not translate to a code change in the dbt repository, the issue will be tagged with the `wontfix` label (see below) and closed.
-
-### Using issue labels
-
-The dbt maintainers use labels to categorize open issues. Some labels indicate the databases impacted by the issue, while others describe the domain in the dbt codebase germane to the discussion. While most of these labels are self-explanatory (eg. `snowflake` or `bigquery`), there are others that are worth describing.
-
-| tag | description |
-| --- | ----------- |
-| bug | This issue represents a defect or regression in dbt |
-| enhancement | This issue represents net-new functionality in dbt |
-| good first issue | This issue does not require deep knowledge of the dbt codebase to implement. This issue is appropriate for a first-time contributor to implement. |
-| snoozed | This issue describes a good idea, but one which will probably not be addressed in a six-month time horizon. The dbt maintainers will revist these issues periodically and re-prioritize them accordingly. |
-| triage | This is a new issue which has not yet been reviewed by a dbt maintainer. This label is removed when a maintainer reviews and responds to the issue. |
-| stale | This is an old issue which has not recently been updated. Stale issues will periodically be closed by dbt maintainers, but they can be re-opened if the discussion is restarted. |
-| wontfix | This issue does not require a code change in the dbt repository, or the maintainers are unwilling/unable to merge a Pull Request which implements the behavior described in the issue. |
-
-### Signing the CLA
-
-All contributors to dbt must sign the [Contributor License Agreement](https://docs.getdbt.com/docs/contributor-license-agreements) to have their Pull Request merged into the dbt codebase. If you are unable to sign the CLA, then the dbt maintainers will unfortunately be unable to merge your Pull Request.
-
+- **Adapters:** Is your issue or proposed code change related to a specific [database adapter](https://docs.getdbt.com/docs/available-adapters)? If so, please open issues, PRs, and discussions in that adapter's repository instead. The sole exception is Postgres; the `dbt-postgres` plugin lives in this repository (`dbt-core`).
+- **CLA:** Please note that anyone contributing code to `dbt-core` must sign the [Contributor License Agreement](https://docs.getdbt.com/docs/contributor-license-agreements). If you are unable to sign the CLA, the `dbt-core` maintainers will unfortunately be unable to merge any of your Pull Requests. We welcome you to participate in discussions, open issues, and comment on existing ones.
+- **Branches:** All pull requests from community contributors should target the `main` branch (default). If the change is needed as a patch for a minor version of dbt that has already been released (or is already a release candidate), a maintainer will backport the changes in your PR to the relevant "latest" release branch (`1.0.latest`, `1.1.latest`, ...)
 
 ## Getting the code
 
 ### Installing git
 
-You will need `git` in order to download and modify the dbt source code. On macOS, the best way to download git is to just install Xcode.
+You will need `git` in order to download and modify the `dbt-core` source code. On macOS, the best way to download git is to just install [Xcode](https://developer.apple.com/support/xcode/).
 
 ### External contributors
 
-If you are not a member of the `fishtown-analytics` GitHub organization, you can contribute to dbt by forking the dbt repository. For a detailed overview on forking, check out the [GitHub docs on forking](https://help.github.com/en/articles/fork-a-repo). In short, you will need to:
+If you are not a member of the `dbt-labs` GitHub organization, you can contribute to `dbt-core` by forking the `dbt-core` repository. For a detailed overview on forking, check out the [GitHub docs on forking](https://help.github.com/en/articles/fork-a-repo). In short, you will need to:
 
-1. fork the dbt repository
-2. clone your fork
-3. check out a new branch for your proposed changes
-4. push changes to your fork
-5. open a pull request against `fishtown-analytics/dbt` from your forked repository
+1. Fork the `dbt-core` repository
+2. Clone your fork locally
+3. Check out a new branch for your proposed changes
+4. Push changes to your fork
+5. Open a pull request against `dbt-labs/dbt-core` from your forked repository
 
-### Core contributors
+### dbt Labs contributors
 
-If you are a member of the `fishtown-analytics` GitHub organization, you will have push access to the dbt repo. Rather than 
-forking dbt to make your changes, just clone the repository and push directly to a branch.
-
+If you are a member of the `dbt-labs` GitHub organization, you will have push access to the `dbt-core` repo. Rather than forking `dbt-core` to make your changes, just clone the repository, check out a new branch, and push directly to that branch.
 
 ## Setting up an environment
 
-To begin developing code in dbt, you should set up the following:
+There are some tools that will be helpful to you in developing locally. While this is the list relevant for `dbt-core` development, many of these tools are used commonly across open-source python projects.
 
-### virtualenv
+### Tools
 
-We strongly recommend using virtual environments when developing code in dbt. We recommend creating this virtualenv
-in the root of the dbt repository. To create a new virtualenv, run:
-```
+These are the tools used in `dbt-core` development and testing:
+
+- [`tox`](https://tox.readthedocs.io/en/latest/) to manage virtualenvs across python versions. We currently target the latest patch releases for Python 3.7, 3.8, 3.9, and 3.10
+- [`pytest`](https://docs.pytest.org/en/latest/) to define, discover, and run tests
+- [`flake8`](https://flake8.pycqa.org/en/latest/) for code linting
+- [`black`](https://github.com/psf/black) for code formatting
+- [`mypy`](https://mypy.readthedocs.io/en/stable/) for static type checking
+- [`pre-commit`](https://pre-commit.com) to easily run those checks
+- [`changie`](https://changie.dev/) to create changelog entries, without merge conflicts
+- [`make`](https://users.cs.duke.edu/~ola/courses/programming/Makefiles/Makefiles.html) to run multiple setup or test steps in combination. Don't worry too much, nobody _really_ understands how `make` works, and our Makefile aims to be super simple.
+- [GitHub Actions](https://github.com/features/actions) for automating tests and checks, once a PR is pushed to the `dbt-core` repository
+
+A deep understanding of these tools in not required to effectively contribute to `dbt-core`, but we recommend checking out the attached documentation if you're interested in learning more about each one.
+
+#### Virtual environments
+
+We strongly recommend using virtual environments when developing code in `dbt-core`. We recommend creating this virtualenv
+in the root of the `dbt-core` repository. To create a new virtualenv, run:
+```sh
 python3 -m venv env
 source env/bin/activate
 ```
 
 This will create and activate a new Python virtual environment.
 
-### docker and docker-compose
+#### Docker and `docker-compose`
 
-Docker and docker-compose are both used in testing. For macOS, the easiest thing to do is to [download docker for mac](https://store.docker.com/editions/community/docker-ce-desktop-mac). You'll need to make an account. On Linux, you can use one of the packages [here](https://docs.docker.com/install/#server). We recommend installing from docker.com instead of from your package manager. On Linux you also have to install docker-compose separately, follow [these instructions](https://docs.docker.com/compose/install/#install-compose).
+Docker and `docker-compose` are both used in testing. Specific instructions for you OS can be found [here](https://docs.docker.com/get-docker/).
 
 
-### Installing postgres locally (optional)
+#### Postgres (optional)
 
 For testing, and later in the examples in this document, you may want to have `psql` available so you can poke around in the database and see what happened. We recommend that you use [homebrew](https://brew.sh/) for that on macOS, and your package manager on Linux. You can install any version of the postgres client that you'd like. On macOS, with homebrew setup, you can run:
 
-```
+```sh
 brew install postgresql
 ```
 
-## Running dbt in development
+## Running `dbt-core` in development
 
 ### Installation
 
-First make sure that you set up your `virtualenv` as described in section _Setting up an environment_. Next, install dbt (and it's dependencies) with:
+First make sure that you set up your `virtualenv` as described in [Setting up an environment](#setting-up-an-environment).  Also ensure you have the latest version of pip installed with `pip install --upgrade pip`. Next, install `dbt-core` (and its dependencies) with:
 
+```sh
+make dev
+# or
+pip install -r dev-requirements.txt -r editable-requirements.txt
 ```
-pip install -r editable_requirements.txt
-```
 
-When dbt is installed from source in this way, any changes you make to the dbt source code will be reflected immediately in your next `dbt` run.
+When installed in this way, any changes you make to your local copy of the source code will be reflected immediately in your next `dbt` run.
 
-### Running dbt
+### Running `dbt-core`
 
 With your virtualenv activated, the `dbt` script should point back to the source code you've cloned on your machine. You can verify this by running `which dbt`. This command should show you a path to an executable in your virtualenv.
 
-Configure your [profile](https://docs.getdbt.com/docs/configure-your-profile) as necessary to connect to your target databases. It may be a good idea to add a new profile pointing to a local postgres instance, or a specific test sandbox within your data warehouse if appropriate.
+Configure your [profile](https://docs.getdbt.com/docs/configure-your-profile) as necessary to connect to your target databases. It may be a good idea to add a new profile pointing to a local Postgres instance, or a specific test sandbox within your data warehouse if appropriate.
 
 ## Testing
 
-Getting the dbt integration tests set up in your local environment will be very helpful as you start to make changes to your local version of dbt. The section that follows outlines some helpful tips for setting up the test environment.
+Once you're able to manually test that your code change is working as expected, it's important to run existing automated tests, as well as adding some new ones. These tests will ensure that:
+- Your code changes do not unexpectedly break other established functionality
+- Your code changes can handle all known edge cases
+- The functionality you're adding will _keep_ working in the future
 
-### Tools
+Although `dbt-core` works with a number of different databases, you won't need to supply credentials for every one of these databases in your test environment. Instead, you can test most `dbt-core` code changes with Python and Postgres.
 
-A short list of tools used in dbt testing that will be helpful to your understanding:
+### Initial setup
 
-- [virtualenv](https://virtualenv.pypa.io/en/stable/) to manage dependencies
-- [tox](https://tox.readthedocs.io/en/latest/) to manage virtualenvs across python versions
-- [pytest](https://docs.pytest.org/en/latest/) to discover/run tests
-- [make](https://users.cs.duke.edu/~ola/courses/programming/Makefiles/Makefiles.html) - but don't worry too much, nobody _really_ understands how make works and our Makefile is super simple
-- [flake8](https://gitlab.com/pycqa/flake8) for code linting
-- [CircleCI](https://circleci.com/product/) and [Azure Pipelines](https://azure.microsoft.com/en-us/services/devops/pipelines/)
+Postgres offers the easiest way to test most `dbt-core` functionality today. They are the fastest to run, and the easiest to set up. To run the Postgres integration tests, you'll have to do one extra step of setting up the test database:
 
-A deep understanding of these tools in not required to effectively contribute to dbt, but we recommend checking out the attached documentation if you're interested in learning more about them.
-
-
-### Running tests via Docker
-
-dbt's unit and integration tests run in Docker. Because dbt works with a number of different databases, you will need to supply credentials for one or more of these databases in your test environment. Most organizations don't have access to each of a BigQuery, Redshift, Snowflake, and Postgres database, so it's likely that you will be unable to run every integration test locally. Fortunately, Fishtown Analytics provides a CI environment with access to sandboxed Redshift, Snowflake, BigQuery, and Postgres databases. See the section on _Submitting a Pull Request_ below for more information on this CI setup.
-
-
-#### Specifying your test credentials
-
-dbt uses test credentials specified in a `test.env` file in the root of the repository. This `test.env` file is git-ignored, but please be _extra_ careful to never check in credentials or other sensitive information when developing against dbt. To create your `test.env` file, copy the provided sample file, then supply your relevant credentials:
-
+```sh
+make setup-db
 ```
-cp test.env.sample test.env
-atom test.env # supply your credentials
-```
-
-We recommend starting with dbt's Postgres tests. These tests cover most of the functionality in dbt, are the fastest to run, and are the easiest to set up. dbt's test suite runs Postgres in a Docker container, so no setup should be required to run these tests. If you additionally want to test Snowflake, Bigquery, or Redshift locally you'll need to get credentials and add them to the `test.env` file. 
-
-#### Running tests
-
-dbt's unit tests and Python linter can be run with:
-
-```
-make test-unit
-```
-
-To run the Postgres + Python 3.6 integration tests, you'll have to do one extra step of setting up the test database:
-
-```
+or, alternatively:
+```sh
 docker-compose up -d database
 PGHOST=localhost PGUSER=root PGPASSWORD=password PGDATABASE=postgres bash test/setup_db.sh
 ```
 
-To run a quick test for Python3 integration tests on Postgres, you can run:
+### Test commands
 
+There are a few methods for running tests locally.
+
+#### Makefile
+
+There are multiple targets in the Makefile to run common test suites and code
+checks, most notably:
+
+```sh
+# Runs unit tests with py38 and code checks in parallel.
+make test
+# Runs postgres integration tests with py38 in "fail fast" mode.
+make integration
 ```
-make test-quick
+> These make targets assume you have a local installation of a recent version of [`tox`](https://tox.readthedocs.io/en/latest/) for unit/integration testing and pre-commit for code quality checks,
+> unless you use choose a Docker container to run tests. Run `make help` for more info.
+
+Check out the other targets in the Makefile to see other commonly used test
+suites.
+
+#### `pre-commit`
+[`pre-commit`](https://pre-commit.com) takes care of running all code-checks for formatting and linting. Run `make dev` to install `pre-commit` in your local environment.  Once this is done you can use any of the linter-based make targets as well as a git pre-commit hook that will ensure proper formatting and linting.
+
+#### `tox`
+
+[`tox`](https://tox.readthedocs.io/en/latest/) takes care of managing virtualenvs and install dependencies in order to run tests. You can also run tests in parallel, for example, you can run unit tests for Python 3.7, Python 3.8, Python 3.9, and Python 3.10 checks in parallel with `tox -p`. Also, you can run unit tests for specific python versions with `tox -e py37`. The configuration for these tests in located in `tox.ini`.
+
+#### `pytest`
+
+Finally, you can also run a specific test or group of tests using [`pytest`](https://docs.pytest.org/en/latest/) directly. With a virtualenv active and dev dependencies installed you can do things like:
+
+```sh
+# run all unit tests in a file
+python3 -m pytest test/unit/test_graph.py
+# run a specific unit test
+python3 -m pytest test/unit/test_graph.py::GraphTest::test__dependency_list
+# run specific Postgres integration tests (old way)
+python3 -m pytest -m profile_postgres test/integration/074_postgres_unlogged_table_tests
+# run specific Postgres integration tests (new way)
+python3 -m pytest tests/functional/sources
 ```
 
-To run tests for a specific database, invoke `tox` directly with the required flags:
-```
-# Run Postgres py36 tests
-docker-compose run test tox -e integration-postgres-py36 -- -x
+> See [pytest usage docs](https://docs.pytest.org/en/6.2.x/usage.html) for an overview of useful command-line options.
 
-# Run Snowflake py36 tests
-docker-compose run test tox -e integration-snowflake-py36 -- -x
+## Adding CHANGELOG Entry
 
-# Run BigQuery py36 tests
-docker-compose run test tox -e integration-bigquery-py36 -- -x
+We use [changie](https://changie.dev) to generate `CHANGELOG` entries. **Note:** Do not edit the `CHANGELOG.md` directly. Your modifications will be lost.
 
-# Run Redshift py36 tests
-docker-compose run test tox -e integration-redshift-py36 -- -x
-```
+Follow the steps to [install `changie`](https://changie.dev/guide/installation/) for your system.
 
-See the `Makefile` contents for more some other examples of ways to run `tox`.
+Once changie is installed and your PR is created, simply run `changie new` and changie will walk you through the process of creating a changelog entry.  Commit the file that's created and your changelog entry is complete!
 
-### Submitting a Pull Request
+You don't need to worry about which `dbt-core` version your change will go into. Just create the changelog entry with `changie`, and open your PR against the `main` branch. All merged changes will be included in the next minor version of `dbt-core`. The Core maintainers _may_ choose to "backport" specific changes in order to patch older minor versions. In that case, a maintainer will take care of that backport after merging your PR, before releasing the new version of `dbt-core`.
 
-Fishtown Analytics provides a sandboxed Redshift, Snowflake, and BigQuery database for use in a CI environment.
+## Submitting a Pull Request
 
-When pull requests are submitted to the `fishtown-analytics/dbt` repo, GitHub will trigger automated tests in CircleCI and Azure Pipelines. If the PR submitter is a member of the `fishtown-analytics` GitHub organization, then the credentials for these databases will be automatically supplied as environment variables in the CI test suite.
+A `dbt-core` maintainer will review your PR. They may suggest code revision for style or clarity, or request that you add unit or integration test(s). These are good things! We believe that, with a little bit of help, anyone can contribute high-quality code.
 
-**If the PR submitter is not a member of the `fishtown-analytics` organization, then these environment variables will not be automatically supplied in the CI environment**. Once a core maintainer has taken a look at the Pull Request, they will kick off the test suite with the required credentials.
+Automated tests run via GitHub Actions. If you're a first-time contributor, all tests (including code checks and unit tests) will require a maintainer to approve. Changes in the `dbt-core` repository trigger integration tests against Postgres. dbt Labs also provides CI environments in which to test changes to other adapters, triggered by PRs in those adapters' repositories, as well as periodic maintenance checks of each adapter in concert with the latest `dbt-core` code changes.
 
-Once your tests are passing and your PR has been reviewed, a dbt maintainer will merge your changes into the active development branch! And that's it! Happy developing :tada:
+Once all tests are passing and your PR has been approved, a `dbt-core` maintainer will merge your changes into the active development branch. And that's it! Happy developing :tada:

@@ -1,61 +1,45 @@
 import abc
+import itertools
 import os
-from typing import (
-    List, Dict, Any, Callable, Iterable, Optional, Generic, TypeVar
+from typing import List, Dict, Any, Generic, Optional, TypeVar
+
+from dbt.dataclass_schema import ValidationError
+
+from dbt import utils
+from dbt.clients.jinja import MacroGenerator
+from dbt.context.providers import (
+    generate_parser_model_context,
+    generate_generate_name_macro_context,
 )
-
-from hologram import ValidationError
-
-import dbt.context.parser
-import dbt.flags
-from dbt import deprecations
-from dbt import hooks
+from dbt.adapters.factory import get_adapter  # noqa: F401
 from dbt.clients.jinja import get_rendered
 from dbt.config import Project, RuntimeConfig
-from dbt.contracts.graph.manifest import (
-    Manifest, SourceFile, FilePath, FileHash
-)
-from dbt.contracts.graph.parsed import HasUniqueID
+from dbt.context.context_config import ContextConfig
+from dbt.contracts.graph.manifest import Manifest
+from dbt.contracts.graph.parsed import HasUniqueID, ManifestNodes
 from dbt.contracts.graph.unparsed import UnparsedNode
-from dbt.exceptions import (
-    CompilationException, validator_error_message
-)
-from dbt.include.global_project import PROJECT_NAME as GLOBAL_PROJECT_NAME
+from dbt.exceptions import ParsingException, validator_error_message, InternalException
+from dbt import hooks
 from dbt.node_types import NodeType
-from dbt.source_config import SourceConfig
-from dbt.parser.results import ParseResult, ManifestNodes
 from dbt.parser.search import FileBlock
-from dbt.clients.system import load_file_contents
 
 # internally, the parser may store a less-restrictive type that will be
 # transformed into the final type. But it will have to be derived from
 # ParsedNode to be operable.
-FinalValue = TypeVar('FinalValue', bound=HasUniqueID)
-IntermediateValue = TypeVar('IntermediateValue', bound=HasUniqueID)
+FinalValue = TypeVar("FinalValue", bound=HasUniqueID)
+IntermediateValue = TypeVar("IntermediateValue", bound=HasUniqueID)
 
-IntermediateNode = TypeVar('IntermediateNode', bound=Any)
-FinalNode = TypeVar('FinalNode', bound=ManifestNodes)
+IntermediateNode = TypeVar("IntermediateNode", bound=Any)
+FinalNode = TypeVar("FinalNode", bound=ManifestNodes)
 
 
-RelationUpdate = Callable[[Optional[str], IntermediateNode], str]
-ConfiguredBlockType = TypeVar('ConfiguredBlockType', bound=FileBlock)
+ConfiguredBlockType = TypeVar("ConfiguredBlockType", bound=FileBlock)
 
 
 class BaseParser(Generic[FinalValue]):
-    def __init__(self, results: ParseResult, project: Project) -> None:
-        self.results = results
+    def __init__(self, project: Project, manifest: Manifest) -> None:
         self.project = project
-        # this should be a superset of [x.path for x in self.results.files]
-        # because we fill it via search()
-        self.searched: List[FilePath] = []
-
-    @abc.abstractmethod
-    def get_paths(self) -> Iterable[FilePath]:
-        pass
-
-    def search(self) -> List[FilePath]:
-        self.searched = list(self.get_paths())
-        return self.searched
+        self.manifest = manifest
 
     @abc.abstractmethod
     def parse_file(self, block: FileBlock) -> None:
@@ -65,35 +49,45 @@ class BaseParser(Generic[FinalValue]):
     def resource_type(self) -> NodeType:
         pass
 
-    def generate_unique_id(self, resource_name: str) -> str:
-        """Returns a unique identifier for a resource"""
-        return "{}.{}.{}".format(self.resource_type,
-                                 self.project.project_name,
-                                 resource_name)
+    def generate_unique_id(self, resource_name: str, hash: Optional[str] = None) -> str:
+        """Returns a unique identifier for a resource
+        An optional hash may be passed in to ensure uniqueness for edge cases"""
 
-    def load_file(self, path: FilePath) -> SourceFile:
-        file_contents = load_file_contents(path.absolute_path, strip=False)
-        checksum = FileHash.from_contents(file_contents)
-        source_file = SourceFile(path=path, checksum=checksum)
-        source_file.contents = file_contents.strip()
-        return source_file
-
-    def parse_file_from_path(self, path: FilePath):
-        block = FileBlock(file=self.load_file(path))
-        self.parse_file(block)
+        return ".".join(
+            filter(None, [self.resource_type, self.project.project_name, resource_name, hash])
+        )
 
 
 class Parser(BaseParser[FinalValue], Generic[FinalValue]):
     def __init__(
         self,
-        results: ParseResult,
         project: Project,
+        manifest: Manifest,
         root_project: RuntimeConfig,
-        macro_manifest: Manifest,
     ) -> None:
-        super().__init__(results, project)
+        super().__init__(project, manifest)
         self.root_project = root_project
-        self.macro_manifest = macro_manifest
+
+
+class RelationUpdate:
+    def __init__(self, config: RuntimeConfig, manifest: Manifest, component: str) -> None:
+        macro = manifest.find_generate_macro_by_name(
+            component=component,
+            root_project_name=config.project_name,
+        )
+        if macro is None:
+            raise InternalException(f"No macro with name generate_{component}_name found")
+
+        root_context = generate_generate_name_macro_context(macro, config, manifest)
+        self.updater = MacroGenerator(macro, root_context)
+        self.component = component
+
+    def __call__(self, parsed_node: Any, config_dict: Dict[str, Any]) -> None:
+        override = config_dict.get(self.component)
+        new_value = self.updater(override, parsed_node)
+        if isinstance(new_value, str):
+            new_value = new_value.strip()
+        setattr(parsed_node, self.component, new_value)
 
 
 class ConfiguredParser(
@@ -102,14 +96,21 @@ class ConfiguredParser(
 ):
     def __init__(
         self,
-        results: ParseResult,
         project: Project,
+        manifest: Manifest,
         root_project: RuntimeConfig,
-        macro_manifest: Manifest,
     ) -> None:
-        super().__init__(results, project, root_project, macro_manifest)
-        self._get_schema_func: Optional[RelationUpdate] = None
-        self._get_alias_func: Optional[RelationUpdate] = None
+        super().__init__(project, manifest, root_project)
+
+        self._update_node_database = RelationUpdate(
+            manifest=manifest, config=root_project, component="database"
+        )
+        self._update_node_schema = RelationUpdate(
+            manifest=manifest, config=root_project, component="schema"
+        )
+        self._update_node_alias = RelationUpdate(
+            manifest=manifest, config=root_project, component="alias"
+        )
 
     @abc.abstractclassmethod
     def get_compiled_path(cls, block: ConfiguredBlockType) -> str:
@@ -131,89 +132,17 @@ class ConfiguredParser(
     def default_database(self):
         return self.root_project.credentials.database
 
-    def get_schema_func(self) -> RelationUpdate:
-        """The get_schema function is set by a few different things:
-            - if there is a 'generate_schema_name' macro in the root project,
-                it will be used.
-            - if that does not exist but there is a 'generate_schema_name'
-                macro in the 'dbt' internal project, that will be used
-            - if neither of those exist (unit tests?), a function that returns
-                the 'default schema' as set in the root project's 'credentials'
-                is used
-        """
-        if self._get_schema_func is not None:
-            return self._get_schema_func
-
-        get_schema_macro = self.macro_manifest.find_macro_by_name(
-            'generate_schema_name',
-            self.root_project.project_name
-        )
-        if get_schema_macro is None:
-            get_schema_macro = self.macro_manifest.find_macro_by_name(
-                'generate_schema_name',
-                GLOBAL_PROJECT_NAME
-            )
-        # this is only true in tests!
-        if get_schema_macro is None:
-            def get_schema(custom_schema_name=None, node=None):
-                return self.default_schema
-        else:
-            root_context = dbt.context.parser.generate_macro(
-                get_schema_macro, self.root_project,
-                self.macro_manifest
-            )
-            get_schema = get_schema_macro.generator(root_context)
-
-        self._get_schema_func = get_schema
-        return self._get_schema_func
-
-    def get_alias_func(self) -> RelationUpdate:
-        """The get_alias function is set by a few different things:
-            - if there is a 'generate_alias_name' macro in the root project,
-                it will be used.
-            - if that does not exist but there is a 'generate_alias_name'
-                macro in the 'dbt' internal project, that will be used
-            - if neither of those exist (unit tests?), a function that returns
-                the 'default alias' as set in the model's filename or alias
-                configuration.
-        """
-        if self._get_alias_func is not None:
-            return self._get_alias_func
-
-        get_alias_macro = self.macro_manifest.find_macro_by_name(
-            'generate_alias_name',
-            self.root_project.project_name
-        )
-        if get_alias_macro is None:
-            get_alias_macro = self.macro_manifest.find_macro_by_name(
-                'generate_alias_name',
-                GLOBAL_PROJECT_NAME
-            )
-
-        # the generate_alias_name macro might not exist
-        if get_alias_macro is None:
-            def get_alias(custom_alias_name, node):
-                if custom_alias_name is None:
-                    return node.name
-                else:
-                    return custom_alias_name
-        else:
-            root_context = dbt.context.parser.generate_macro(
-                get_alias_macro, self.root_project,
-                self.macro_manifest
-            )
-            get_alias = get_alias_macro.generator(root_context)
-
-        self._get_alias_func = get_alias
-        return self._get_alias_func
+    def get_fqn_prefix(self, path: str) -> List[str]:
+        no_ext = os.path.splitext(path)[0]
+        fqn = [self.project.project_name]
+        fqn.extend(utils.split_path(no_ext)[:-1])
+        return fqn
 
     def get_fqn(self, path: str, name: str) -> List[str]:
         """Get the FQN for the node. This impacts node selection and config
         application.
         """
-        no_ext = os.path.splitext(path)[0]
-        fqn = [self.project.project_name]
-        fqn.extend(dbt.utils.split_path(no_ext)[:-1])
+        fqn = self.get_fqn_prefix(path)
         fqn.append(name)
         return fqn
 
@@ -227,7 +156,11 @@ class ConfiguredParser(
                 config[key] = [hooks.get_hook_dict(h) for h in config[key]]
 
     def _create_error_node(
-        self, name: str, path: str, original_file_path: str, raw_sql: str,
+        self,
+        name: str,
+        path: str,
+        original_file_path: str,
+        raw_sql: str,
     ) -> UnparsedNode:
         """If we hit an error before we've actually parsed a node, provide some
         level of useful information by attaching this to the exception.
@@ -248,7 +181,8 @@ class ConfiguredParser(
         self,
         block: ConfiguredBlockType,
         path: str,
-        config: SourceConfig,
+        config: ContextConfig,
+        fqn: List[str],
         name=None,
         **kwargs,
     ) -> IntermediateNode:
@@ -259,23 +193,24 @@ class ConfiguredParser(
         if name is None:
             name = block.name
         dct = {
-            'alias': name,
-            'schema': self.default_schema,
-            'database': self.default_database,
-            'fqn': config.fqn,
-            'name': name,
-            'root_path': self.project.project_root,
-            'resource_type': self.resource_type,
-            'path': path,
-            'original_file_path': block.path.original_file_path,
-            'package_name': self.project.project_name,
-            'raw_sql': block.contents,
-            'unique_id': self.generate_unique_id(name),
-            'config': self.config_dict(config),
+            "alias": name,
+            "schema": self.default_schema,
+            "database": self.default_database,
+            "fqn": fqn,
+            "name": name,
+            "root_path": self.project.project_root,
+            "resource_type": self.resource_type,
+            "path": path,
+            "original_file_path": block.path.original_file_path,
+            "package_name": self.project.project_name,
+            "raw_sql": block.contents,
+            "unique_id": self.generate_unique_id(name),
+            "config": self.config_dict(config),
+            "checksum": block.file.checksum.to_dict(omit_none=True),
         }
         dct.update(kwargs)
         try:
-            return self.parse_from_dict(dct)
+            return self.parse_from_dict(dct, validate=True)
         except ValidationError as exc:
             msg = validator_error_message(exc)
             # this is a bit silly, but build an UnparsedNode just for error
@@ -286,119 +221,146 @@ class ConfiguredParser(
                 original_file_path=block.path.original_file_path,
                 raw_sql=block.contents,
             )
-            raise CompilationException(msg, node=node)
+            raise ParsingException(msg, node=node)
 
-    def render_with_context(
-        self, parsed_node: IntermediateNode, config: SourceConfig
-    ) -> None:
-        """Given the parsed node and a SourceConfig to use during parsing,
-        render the node's sql wtih macro capture enabled.
+    def _context_for(self, parsed_node: IntermediateNode, config: ContextConfig) -> Dict[str, Any]:
+        return generate_parser_model_context(parsed_node, self.root_project, self.manifest, config)
 
-        Note: this mutates the config object when config() calls are rendered.
-        """
-        context = dbt.context.parser.generate(
-            parsed_node, self.root_project, self.macro_manifest, config
-        )
+    def render_with_context(self, parsed_node: IntermediateNode, config: ContextConfig):
+        # Given the parsed node and a ContextConfig to use during parsing,
+        # render the node's sql wtih macro capture enabled.
+        # Note: this mutates the config object when config calls are rendered.
+        context = self._context_for(parsed_node, config)
 
-        get_rendered(parsed_node.raw_sql, context, parsed_node,
-                     capture_macros=True)
+        # this goes through the process of rendering, but just throws away
+        # the rendered result. The "macro capture" is the point?
+        get_rendered(parsed_node.raw_sql, context, parsed_node, capture_macros=True)
+        return context
 
-    def update_parsed_node_schema(
-        self, parsed_node: IntermediateNode, config_dict: Dict[str, Any]
-    ) -> None:
-        # Special macro defined in the global project. Use the root project's
-        # definition, not the current package
-        schema_override = config_dict.get('schema')
-        get_schema = self.get_schema_func()
-        try:
-            schema = get_schema(schema_override, parsed_node)
-        except dbt.exceptions.CompilationException as exc:
-            too_many_args = (
-                "macro 'dbt_macro__generate_schema_name' takes not more than "
-                "1 argument(s)"
-            )
-            if too_many_args not in str(exc):
-                raise
-            deprecations.warn('generate-schema-name-single-arg')
-            schema = get_schema(schema_override)  # type: ignore
-        parsed_node.schema = schema.strip()
-
-    def update_parsed_node_alias(
-        self, parsed_node: IntermediateNode, config_dict: Dict[str, Any]
-    ) -> None:
-        alias_override = config_dict.get('alias')
-        get_alias = self.get_alias_func()
-        parsed_node.alias = get_alias(alias_override, parsed_node).strip()
-
-    def update_parsed_node_config(
+    # This is taking the original config for the node, converting it to a dict,
+    # updating the config with new config passed in, then re-creating the
+    # config from the dict in the node.
+    def update_parsed_node_config_dict(
         self, parsed_node: IntermediateNode, config_dict: Dict[str, Any]
     ) -> None:
         # Overwrite node config
-        final_config_dict = parsed_node.config.to_dict()
-        final_config_dict.update(config_dict)
+        final_config_dict = parsed_node.config.to_dict(omit_none=True)
+        final_config_dict.update({k.strip(): v for (k, v) in config_dict.items()})
         # re-mangle hooks, in case we got new ones
         self._mangle_hooks(final_config_dict)
         parsed_node.config = parsed_node.config.from_dict(final_config_dict)
 
-    def update_parsed_node(
-        self, parsed_node: IntermediateNode, config: SourceConfig
+    def update_parsed_node_name(
+        self, parsed_node: IntermediateNode, config_dict: Dict[str, Any]
     ) -> None:
-        """Given the SourceConfig used for parsing and the parsed node,
+        self._update_node_database(parsed_node, config_dict)
+        self._update_node_schema(parsed_node, config_dict)
+        self._update_node_alias(parsed_node, config_dict)
+
+    def update_parsed_node_config(
+        self,
+        parsed_node: IntermediateNode,
+        config: ContextConfig,
+        context=None,
+        patch_config_dict=None,
+    ) -> None:
+        """Given the ContextConfig used for parsing and the parsed node,
         generate and set the true values to use, overriding the temporary parse
         values set in _build_intermediate_parsed_node.
         """
-        config_dict = config.config
 
-        # Set tags on node provided in config blocks
-        model_tags = config_dict.get('tags', [])
-        parsed_node.tags.extend(model_tags)
+        # build_config_dict takes the config_call_dict in the ContextConfig object
+        # and calls calculate_node_config to combine dbt_project configs and
+        # config calls from SQL files, plus patch configs (from schema files)
+        config_dict = config.build_config_dict(patch_config_dict=patch_config_dict)
 
-        # do this once before we parse the node schema/alias, so
+        # Set tags on node provided in config blocks. Tags are additive, so even if
+        # config has been built before, we don't have to reset tags in the parsed_node.
+        model_tags = config_dict.get("tags", [])
+        for tag in model_tags:
+            if tag not in parsed_node.tags:
+                parsed_node.tags.append(tag)
+
+        # If we have meta in the config, copy to node level, for backwards
+        # compatibility with earlier node-only config.
+        if "meta" in config_dict and config_dict["meta"]:
+            parsed_node.meta = config_dict["meta"]
+
+        # unrendered_config is used to compare the original database/schema/alias
+        # values and to handle 'same_config' and 'same_contents' calls
+        parsed_node.unrendered_config = config.build_config_dict(rendered=False)
+
+        parsed_node.config_call_dict = config._config_call_dict
+
+        # do this once before we parse the node database/schema/alias, so
         # parsed_node.config is what it would be if they did nothing
-        self.update_parsed_node_config(parsed_node, config_dict)
+        self.update_parsed_node_config_dict(parsed_node, config_dict)
+        # This updates the node database/schema/alias
+        self.update_parsed_node_name(parsed_node, config_dict)
 
-        parsed_node.database = config_dict.get(
-            'database', self.default_database
-        ).strip()
-        self.update_parsed_node_schema(parsed_node, config_dict)
-        self.update_parsed_node_alias(parsed_node, config_dict)
+        # tests don't have hooks
+        if parsed_node.resource_type == NodeType.Test:
+            return
 
-    def initial_config(self, fqn: List[str]) -> SourceConfig:
-        return SourceConfig(self.root_project, self.project, fqn,
-                            self.resource_type)
+        # at this point, we've collected our hooks. Use the node context to
+        # render each hook and collect refs/sources
+        hooks = list(itertools.chain(parsed_node.config.pre_hook, parsed_node.config.post_hook))
+        # skip context rebuilding if there aren't any hooks
+        if not hooks:
+            return
+        if not context:
+            context = self._context_for(parsed_node, config)
+        for hook in hooks:
+            get_rendered(hook.sql, context, parsed_node, capture_macros=True)
 
-    def config_dict(self, config: SourceConfig) -> Dict[str, Any]:
-        config_dict = config.config
+    def initial_config(self, fqn: List[str]) -> ContextConfig:
+        config_version = min([self.project.config_version, self.root_project.config_version])
+        if config_version == 2:
+            return ContextConfig(
+                self.root_project,
+                fqn,
+                self.resource_type,
+                self.project.project_name,
+            )
+        else:
+            raise InternalException(
+                f"Got an unexpected project version={config_version}, " f"expected 2"
+            )
+
+    def config_dict(
+        self,
+        config: ContextConfig,
+    ) -> Dict[str, Any]:
+        config_dict = config.build_config_dict(base=True)
         self._mangle_hooks(config_dict)
         return config_dict
 
-    def render_update(
-        self, node: IntermediateNode, config: SourceConfig
-    ) -> None:
+    def render_update(self, node: IntermediateNode, config: ContextConfig) -> None:
         try:
-            self.render_with_context(node, config)
-            self.update_parsed_node(node, config)
+            context = self.render_with_context(node, config)
+            self.update_parsed_node_config(node, config, context=context)
         except ValidationError as exc:
             # we got a ValidationError - probably bad types in config()
             msg = validator_error_message(exc)
-            raise CompilationException(msg, node=node) from exc
+            raise ParsingException(msg, node=node) from exc
 
     def add_result_node(self, block: FileBlock, node: ManifestNodes):
         if node.config.enabled:
-            self.results.add_node(block.file, node)
+            self.manifest.add_node(block.file, node)
         else:
-            self.results.add_disabled(block.file, node)
+            self.manifest.add_disabled(block.file, node)
 
     def parse_node(self, block: ConfiguredBlockType) -> FinalNode:
         compiled_path: str = self.get_compiled_path(block)
         fqn = self.get_fqn(compiled_path, block.name)
 
-        config: SourceConfig = self.initial_config(fqn)
+        config: ContextConfig = self.initial_config(fqn)
 
         node = self._create_parsetime_node(
             block=block,
             path=compiled_path,
-            config=config
+            config=config,
+            fqn=fqn,
         )
         self.render_update(node, config)
         result = self.transform(node)
@@ -416,22 +378,19 @@ class ConfiguredParser(
 
 class SimpleParser(
     ConfiguredParser[ConfiguredBlockType, FinalNode, FinalNode],
-    Generic[ConfiguredBlockType, FinalNode]
+    Generic[ConfiguredBlockType, FinalNode],
 ):
     def transform(self, node):
         return node
 
 
 class SQLParser(
-    ConfiguredParser[FileBlock, IntermediateNode, FinalNode],
-    Generic[IntermediateNode, FinalNode]
+    ConfiguredParser[FileBlock, IntermediateNode, FinalNode], Generic[IntermediateNode, FinalNode]
 ):
     def parse_file(self, file_block: FileBlock) -> None:
         self.parse_node(file_block)
 
 
-class SimpleSQLParser(
-    SQLParser[FinalNode, FinalNode]
-):
+class SimpleSQLParser(SQLParser[FinalNode, FinalNode]):
     def transform(self, node):
         return node

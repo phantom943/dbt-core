@@ -1,4 +1,6 @@
 from test.integration.base import DBTIntegrationTest, use_profile
+import os
+
 
 class TestPrePostRunHooks(DBTIntegrationTest):
 
@@ -21,6 +23,7 @@ class TestPrePostRunHooks(DBTIntegrationTest):
             'run_started_at',
             'invocation_id'
         ]
+        os.environ['TERM_TEST'] = 'TESTING'
 
     @property
     def schema(self):
@@ -29,8 +32,9 @@ class TestPrePostRunHooks(DBTIntegrationTest):
     @property
     def project_config(self):
         return {
+            'config-version': 2,
             'macro-paths': ['macros'],
-            'data-paths': ['data'],
+            'seed-paths': ['seeds'],
 
             # The create and drop table statements here validate that these hooks run
             # in the same order that they are defined. Drop before create is an error.
@@ -39,13 +43,16 @@ class TestPrePostRunHooks(DBTIntegrationTest):
                 "{{ custom_run_hook('start', target, run_started_at, invocation_id) }}",
                 "create table {{ target.schema }}.start_hook_order_test ( id int )",
                 "drop table {{ target.schema }}.start_hook_order_test",
+                "{{ log(env_var('TERM_TEST'), info=True) }}",
             ],
             "on-run-end": [
                 "{{ custom_run_hook('end', target, run_started_at, invocation_id) }}",
                 "create table {{ target.schema }}.end_hook_order_test ( id int )",
                 "drop table {{ target.schema }}.end_hook_order_test",
                 "create table {{ target.schema }}.schemas ( schema text )",
-                "insert into {{ target.schema }}.schemas values ({% for schema in schemas %}( '{{ schema }}' ){% if not loop.last %},{% endif %}{% endfor %})",
+                "insert into {{ target.schema }}.schemas (schema) values {% for schema in schemas %}( '{{ schema }}' ){% if not loop.last %},{% endif %}{% endfor %}",
+                "create table {{ target.schema }}.db_schemas ( db text, schema text )",
+                "insert into {{ target.schema }}.db_schemas (db, schema) values {% for db, schema in database_schemas %}('{{ db }}', '{{ schema }}' ){% if not loop.last %},{% endif %}{% endfor %}",
             ],
             'seeds': {
                 'quote_columns': False,
@@ -72,6 +79,12 @@ class TestPrePostRunHooks(DBTIntegrationTest):
         results = self.run_sql(schemas_query, fetch='all')
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0][0], self.unique_schema())
+
+        db_schemas_query = 'select * from {}.db_schemas'.format(self.unique_schema())
+        results = self.run_sql(db_schemas_query, fetch='all')
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][0], self.default_database)
+        self.assertEqual(results[0][1], self.unique_schema())
 
     def check_hooks(self, state):
         ctx = self.get_ctx_vars(state)

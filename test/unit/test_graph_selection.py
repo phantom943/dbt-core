@@ -1,203 +1,204 @@
 import unittest
 from unittest import mock
 
+import pytest
+
 import string
 import dbt.exceptions
 import dbt.graph.selector as graph_selector
+import dbt.graph.cli as graph_cli
+from dbt.node_types import NodeType
 
 import networkx as nx
 
+from dbt import flags
 
-class BaseGraphSelectionTest(unittest.TestCase):
-    def create_graph(self):
-        raise NotImplementedError
+from argparse import Namespace
+from dbt.contracts.project import UserConfig
 
-    def add_tags(self, nodes):
-        pass
-
-    def setUp(self):
-        self.package_graph = graph_selector.Graph(self.create_graph())
-        nodes = {
-            node: mock.MagicMock(fqn=node.split('.')[1:], tags=[])
-            for node in self.package_graph
-        }
-        self.add_tags(nodes)
-        self.manifest = mock.MagicMock(nodes=nodes)
-        self.selector = graph_selector.NodeSelector(self.package_graph, self.manifest)
+flags.set_from_args(Namespace(), UserConfig())
 
 
-class GraphSelectionTest(BaseGraphSelectionTest):
-    def create_graph(self):
-        integer_graph = nx.balanced_tree(2, 2, nx.DiGraph())
+def _get_graph():
+    integer_graph = nx.balanced_tree(2, 2, nx.DiGraph())
 
-        package_mapping = {
-            i: 'm.' + ('X' if i % 2 == 0 else 'Y') + '.' + letter
-            for (i, letter) in enumerate(string.ascii_lowercase)
-        }
+    package_mapping = {
+        i: 'm.' + ('X' if i % 2 == 0 else 'Y') + '.' + letter
+        for (i, letter) in enumerate(string.ascii_lowercase)
+    }
 
-        # Edges: [(X.a, Y.b), (X.a, X.c), (Y.b, Y.d), (Y.b, X.e), (X.c, Y.f), (X.c, X.g)]
-        return nx.relabel_nodes(integer_graph, package_mapping)
+    # Edges: [(X.a, Y.b), (X.a, X.c), (Y.b, Y.d), (Y.b, X.e), (X.c, Y.f), (X.c, X.g)]
+    return graph_selector.Graph(nx.relabel_nodes(integer_graph, package_mapping))
 
-    def add_tags(self, nodes):
-        nodes['m.X.a'].tags = ['abc']
-        nodes['m.Y.b'].tags = ['abc']
-        nodes['m.X.c'].tags = ['abc']
-        nodes['m.Y.d'].tags = []
-        nodes['m.X.e'].tags = ['efg']
-        nodes['m.Y.f'].tags = ['efg']
-        nodes['m.X.g'].tags = ['efg']
 
-    def run_specs_and_assert(self, graph, include, exclude, expected):
-        selected = self.selector.select_nodes(
-            graph,
-            include,
-            exclude
+def _get_manifest(graph):
+    nodes = {}
+    for unique_id in graph:
+        fqn = unique_id.split('.')
+        node = mock.MagicMock(
+            unique_id=unique_id,
+            fqn=fqn,
+            package_name=fqn[0],
+            tags=[],
+            resource_type=NodeType.Model,
+            empty=False,
+            config=mock.MagicMock(enabled=True),
         )
+        nodes[unique_id] = node
 
-        self.assertEqual(selected, expected)
+    nodes['m.X.a'].tags = ['abc']
+    nodes['m.Y.b'].tags = ['abc', 'bcef']
+    nodes['m.X.c'].tags = ['abc', 'bcef']
+    nodes['m.Y.d'].tags = []
+    nodes['m.X.e'].tags = ['efg', 'bcef']
+    nodes['m.Y.f'].tags = ['efg', 'bcef']
+    nodes['m.X.g'].tags = ['efg']
+    return mock.MagicMock(nodes=nodes)
 
 
-    def test__single_node_selection_in_package(self):
-        self.run_specs_and_assert(
-            self.package_graph,
-            ['X.a'],
-            [],
-            set(['m.X.a'])
-        )
+@pytest.fixture
+def graph():
+    return graph_selector.Graph(_get_graph())
 
-    def test__select_by_tag(self):
-        self.run_specs_and_assert(
-            self.package_graph,
-            ['tag:abc'],
-            [],
-            set(['m.X.a', 'm.Y.b', 'm.X.c'])
-        )
 
-    def test__exclude_by_tag(self):
-        self.run_specs_and_assert(
-            self.package_graph,
-            ['*'],
-            ['tag:abc'],
-            set(['m.Y.d', 'm.X.e', 'm.Y.f', 'm.X.g'])
-        )
+@pytest.fixture
+def manifest(graph):
+    return _get_manifest(graph)
 
-    def test__select_by_tag_and_model_name(self):
-        self.run_specs_and_assert(
-            self.package_graph,
-            ['tag:abc', 'a'],
-            [],
-            set(['m.X.a', 'm.Y.b', 'm.X.c'])
-        )
 
-        self.run_specs_and_assert(
-            self.package_graph,
-            ['tag:abc', 'd'],
-            [],
-            set(['m.X.a', 'm.Y.b', 'm.X.c', 'm.Y.d'])
-        )
+def id_macro(arg):
+    if isinstance(arg, str):
+        return arg
+    try:
+        return '_'.join(arg)
+    except TypeError:
+        return arg
 
-    def test__multiple_node_selection_in_package(self):
-        self.run_specs_and_assert(
-            self.package_graph,
-            ['X.a', 'b'],
-            [],
-            set(['m.X.a', 'm.Y.b'])
-        )
 
-    def test__select_children_except_in_package(self):
-        self.run_specs_and_assert(
-            self.package_graph,
-            ['X.a+'],
-            ['b'],
-            set(['m.X.a','m.X.c', 'm.Y.d','m.X.e','m.Y.f','m.X.g']))
+run_specs = [
+    # include by fqn
+    (['X.a'], [], {'m.X.a'}),
+    # include by tag
+    (['tag:abc'], [], {'m.X.a', 'm.Y.b', 'm.X.c'}),
+    # exclude by tag
+    (['*'], ['tag:abc'], {'m.Y.d', 'm.X.e', 'm.Y.f', 'm.X.g'}),
+    # tag + fqn
+    (['tag:abc', 'a'], [], {'m.X.a', 'm.Y.b', 'm.X.c'}),
+    (['tag:abc', 'd'], [], {'m.X.a', 'm.Y.b', 'm.X.c', 'm.Y.d'}),
+    # multiple node selection across packages
+    (['X.a', 'b'], [], {'m.X.a', 'm.Y.b'}),
+    (['X.a+'], ['b'], {'m.X.a','m.X.c', 'm.Y.d','m.X.e','m.Y.f','m.X.g'}),
+    # children
+    (['X.c+'], [], {'m.X.c', 'm.Y.f', 'm.X.g'}),
+    (['X.a+1'], [], {'m.X.a', 'm.Y.b', 'm.X.c'}),
+    (['X.a+'], ['tag:efg'], {'m.X.a','m.Y.b','m.X.c', 'm.Y.d'}),
+    # parents
+    (['+Y.f'], [], {'m.X.c', 'm.Y.f', 'm.X.a'}),
+    (['1+Y.f'], [], {'m.X.c', 'm.Y.f'}),
+    # childrens parents
+    (['@X.c'], [], {'m.X.a', 'm.X.c', 'm.Y.f', 'm.X.g'}),
+    # multiple selection/exclusion
+    (['tag:abc', 'tag:bcef'], [], {'m.X.a', 'm.Y.b', 'm.X.c', 'm.X.e', 'm.Y.f'}),
+    (['tag:abc', 'tag:bcef'], ['tag:efg'], {'m.X.a', 'm.Y.b', 'm.X.c'}),
+    (['tag:abc', 'tag:bcef'], ['tag:efg', 'a'], {'m.Y.b', 'm.X.c'}),
+    # intersections
+    (['a,a'], [], {'m.X.a'}),
+    (['+c,c+'], [], {'m.X.c'}),
+    (['a,b'], [], set()),
+    (['tag:abc,tag:bcef'], [], {'m.Y.b', 'm.X.c'}),
+    (['*,tag:abc,a'], [], {'m.X.a'}),
+    (['a,tag:abc,*'], [], {'m.X.a'}),
+    (['tag:abc,tag:bcef'], ['c'], {'m.Y.b'}),
+    (['tag:bcef,tag:efg'], ['tag:bcef,@b'], {'m.Y.f'}),
+    (['tag:bcef,tag:efg'], ['tag:bcef,@a'], set()),
+    (['*,@a,+b'], ['*,tag:abc,tag:bcef'], {'m.X.a'}),
+    (['tag:bcef,tag:efg', '*,tag:abc'], [], {'m.X.a', 'm.Y.b', 'm.X.c', 'm.X.e', 'm.Y.f'}),
+    (['tag:bcef,tag:efg', '*,tag:abc'], ['e'], {'m.X.a', 'm.Y.b', 'm.X.c', 'm.Y.f'}),
+    (['tag:bcef,tag:efg', '*,tag:abc'], ['e'], {'m.X.a', 'm.Y.b', 'm.X.c', 'm.Y.f'}),
+    (['tag:bcef,tag:efg', '*,tag:abc'], ['e', 'f'], {'m.X.a', 'm.Y.b', 'm.X.c'}),
+    (['tag:bcef,tag:efg', '*,tag:abc'], ['tag:abc,tag:bcef'], {'m.X.a', 'm.X.e', 'm.Y.f'}),
+    (['tag:bcef,tag:efg', '*,tag:abc'], ['tag:abc,tag:bcef', 'tag:abc,a'], {'m.X.e', 'm.Y.f'})
+]
 
-    def test__select_children_except_tag(self):
-        self.run_specs_and_assert(
-            self.package_graph,
-            ['X.a+'],
-            ['tag:efg'],
-            set(['m.X.a','m.Y.b','m.X.c', 'm.Y.d']))
 
-    def test__select_childrens_parents(self):
-        self.run_specs_and_assert(
-            self.package_graph,
-            ['@X.c'],
-            [],
-            set(['m.X.a', 'm.X.c', 'm.Y.f', 'm.X.g'])
-        )
+@pytest.mark.parametrize('include,exclude,expected', run_specs, ids=id_macro)
+def test_run_specs(include, exclude, expected):
+    graph = _get_graph()
+    manifest = _get_manifest(graph)
+    selector = graph_selector.NodeSelector(graph, manifest)
+    spec = graph_cli.parse_difference(include, exclude)
+    selected, _ = selector.select_nodes(spec)
 
-    def parse_spec_and_assert(self, spec, parents, children, filter_type, filter_value, childrens_parents):
-        parsed = graph_selector.SelectionCriteria(spec)
-        self.assertEqual(parsed.select_parents, parents)
-        self.assertEqual(parsed.select_children, children)
-        self.assertEqual(parsed.selector_type, filter_type)
-        self.assertEqual(parsed.selector_value, filter_value)
-        self.assertEqual(parsed.select_childrens_parents, childrens_parents)
+    assert selected == expected
 
-    def invalid_spec(self, spec):
-        with self.assertRaises(dbt.exceptions.RuntimeException):
-            graph_selector.SelectionCriteria(spec)
 
-    def test__spec_parsing(self):
-        self.parse_spec_and_assert('a', False, False, 'fqn', 'a', False)
-        self.parse_spec_and_assert('+a', True, False, 'fqn', 'a', False)
-        self.parse_spec_and_assert('a+', False, True, 'fqn', 'a', False)
-        self.parse_spec_and_assert('+a+', True, True, 'fqn', 'a', False)
-        self.parse_spec_and_assert('@a', False, False, 'fqn', 'a', True)
-        self.invalid_spec('@a+')
+param_specs = [
+    ('a', False, None, False, None, 'fqn', 'a', False),
+    ('+a', True, None, False, None, 'fqn', 'a', False),
+    ('256+a', True, 256, False, None, 'fqn', 'a', False),
+    ('a+', False, None, True, None, 'fqn', 'a', False),
+    ('a+256', False, None, True, 256, 'fqn', 'a', False),
+    ('+a+', True, None, True, None, 'fqn', 'a', False),
+    ('16+a+32', True, 16, True, 32, 'fqn', 'a', False),
+    ('@a', False, None, False, None, 'fqn', 'a', True),
+    ('a.b', False, None, False, None, 'fqn', 'a.b', False),
+    ('+a.b', True, None, False, None, 'fqn', 'a.b', False),
+    ('256+a.b', True, 256, False, None, 'fqn', 'a.b', False),
+    ('a.b+', False, None, True, None, 'fqn', 'a.b', False),
+    ('a.b+256', False, None, True, 256, 'fqn', 'a.b', False),
+    ('+a.b+', True, None, True, None, 'fqn', 'a.b', False),
+    ('16+a.b+32', True, 16, True, 32, 'fqn', 'a.b', False),
+    ('@a.b', False, None, False, None, 'fqn', 'a.b', True),
+    ('a.b.*', False, None, False, None, 'fqn', 'a.b.*', False),
+    ('+a.b.*', True, None, False, None, 'fqn', 'a.b.*', False),
+    ('256+a.b.*', True, 256, False, None, 'fqn', 'a.b.*', False),
+    ('a.b.*+', False, None, True, None, 'fqn', 'a.b.*', False),
+    ('a.b.*+256', False, None, True, 256, 'fqn', 'a.b.*', False),
+    ('+a.b.*+', True, None, True, None, 'fqn', 'a.b.*', False),
+    ('16+a.b.*+32', True, 16, True, 32, 'fqn', 'a.b.*', False),
+    ('@a.b.*', False, None, False, None, 'fqn', 'a.b.*', True),
+    ('tag:a', False, None, False, None, 'tag', 'a', False),
+    ('+tag:a', True, None, False, None, 'tag', 'a', False),
+    ('256+tag:a', True, 256, False, None, 'tag', 'a', False),
+    ('tag:a+', False, None, True, None, 'tag', 'a', False),
+    ('tag:a+256', False, None, True, 256, 'tag', 'a', False),
+    ('+tag:a+', True, None, True, None, 'tag', 'a', False),
+    ('16+tag:a+32', True, 16, True, 32, 'tag', 'a', False),
+    ('@tag:a', False, None, False, None, 'tag', 'a', True),
+    ('source:a', False, None, False, None, 'source', 'a', False),
+    ('source:a+', False, None, True, None, 'source', 'a', False),
+    ('source:a+1', False, None, True, 1, 'source', 'a', False),
+    ('source:a+32', False, None, True, 32, 'source', 'a', False),
+    ('@source:a', False, None, False, None, 'source', 'a', True),
+]
 
-        self.parse_spec_and_assert('a.b', False, False, 'fqn', 'a.b', False)
-        self.parse_spec_and_assert('+a.b', True, False, 'fqn', 'a.b', False)
-        self.parse_spec_and_assert('a.b+', False, True, 'fqn', 'a.b', False)
-        self.parse_spec_and_assert('+a.b+', True, True, 'fqn', 'a.b', False)
-        self.parse_spec_and_assert('@a.b', False, False, 'fqn', 'a.b', True)
-        self.invalid_spec('@a.b+')
 
-        self.parse_spec_and_assert('a.b.*', False, False, 'fqn', 'a.b.*', False)
-        self.parse_spec_and_assert('+a.b.*', True, False, 'fqn', 'a.b.*', False)
-        self.parse_spec_and_assert('a.b.*+', False, True, 'fqn', 'a.b.*', False)
-        self.parse_spec_and_assert('+a.b.*+', True, True, 'fqn', 'a.b.*', False)
-        self.parse_spec_and_assert('@a.b.*', False, False, 'fqn', 'a.b.*', True)
-        self.invalid_spec('@a.b*+')
+@pytest.mark.parametrize(
+    'spec,parents,parents_depth,children,children_depth,filter_type,filter_value,childrens_parents',
+    param_specs,
+    ids=id_macro
+)
+def test_parse_specs(spec, parents, parents_depth, children, children_depth, filter_type, filter_value, childrens_parents):
+    parsed = graph_selector.SelectionCriteria.from_single_spec(spec)
+    assert parsed.parents == parents
+    assert parsed.parents_depth == parents_depth
+    assert parsed.children == children
+    assert parsed.children_depth == children_depth
+    assert parsed.method == filter_type
+    assert parsed.value == filter_value
+    assert parsed.childrens_parents == childrens_parents
 
-        self.parse_spec_and_assert('tag:a', False, False, 'tag', 'a', False)
-        self.parse_spec_and_assert('+tag:a', True, False, 'tag', 'a', False)
-        self.parse_spec_and_assert('tag:a+', False, True, 'tag', 'a', False)
-        self.parse_spec_and_assert('+tag:a+', True, True, 'tag', 'a', False)
-        self.parse_spec_and_assert('@tag:a', False, False, 'tag', 'a', True)
-        self.invalid_spec('@tag:a+')
 
-        self.parse_spec_and_assert('source:a', False, False, 'source', 'a', False)
-        self.parse_spec_and_assert('source:a+', False, True, 'source', 'a', False)
-        self.parse_spec_and_assert('@source:a', False, False, 'source', 'a', True)
-        self.invalid_spec('@source:a+')
+invalid_specs = [
+    '@a+',
+    '@a.b+',
+    '@a.b*+',
+    '@tag:a+',
+    '@source:a+',
+]
 
-    def test__package_name_getter(self):
-        found = graph_selector.get_package_names(self.package_graph)
 
-        expected = set(['X', 'Y'])
-        self.assertEqual(found, expected)
-
-    def assert_is_selected_node(self, node, spec, should_work):
-        self.assertEqual(
-            graph_selector.is_selected_node(node, spec),
-            should_work
-        )
-
-    def test__is_selected_node(self):
-        self.assert_is_selected_node(('X', 'a'), ('a'), True)
-        self.assert_is_selected_node(('X', 'a'), ('X', 'a'), True)
-        self.assert_is_selected_node(('X', 'a'), ('*'), True)
-        self.assert_is_selected_node(('X', 'a'), ('X', '*'), True)
-
-        self.assert_is_selected_node(('X', 'a', 'b', 'c'), ('X', '*'), True)
-        self.assert_is_selected_node(('X', 'a', 'b', 'c'), ('X', 'a', '*'), True)
-        self.assert_is_selected_node(('X', 'a', 'b', 'c'), ('X', 'a', 'b', '*'), True)
-        self.assert_is_selected_node(('X', 'a', 'b', 'c'), ('X', 'a', 'b', 'c'), True)
-        self.assert_is_selected_node(('X', 'a', 'b', 'c'), ('X', 'a'), True)
-        self.assert_is_selected_node(('X', 'a', 'b', 'c'), ('X', 'a', 'b'), True)
-
-        self.assert_is_selected_node(('X', 'a'), ('b'), False)
-        self.assert_is_selected_node(('X', 'a'), ('X', 'b'), False)
-        self.assert_is_selected_node(('X', 'a'), ('X', 'a', 'b'), False)
-        self.assert_is_selected_node(('X', 'a'), ('Y', '*'), False)
+@pytest.mark.parametrize('invalid', invalid_specs, ids=lambda k: str(k))
+def test_invalid_specs(invalid):
+    with pytest.raises(dbt.exceptions.RuntimeException):
+        graph_selector.SelectionCriteria.from_single_spec(invalid)

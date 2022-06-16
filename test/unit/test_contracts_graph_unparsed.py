@@ -1,12 +1,15 @@
+import copy
 import pickle
 from datetime import timedelta
 
 from dbt.contracts.graph.unparsed import (
     UnparsedNode, UnparsedRunHook, UnparsedMacro, Time, TimePeriod,
-    FreshnessStatus, FreshnessThreshold, Quoting, UnparsedSourceDefinition,
-    UnparsedSourceTableDefinition, UnparsedDocumentationFile, NamedTested,
-    UnparsedNodeUpdate
+    FreshnessThreshold, Quoting, UnparsedSourceDefinition,
+    UnparsedSourceTableDefinition, UnparsedDocumentationFile, UnparsedColumn,
+    UnparsedNodeUpdate, Docs, UnparsedExposure, MaturityType, ExposureOwner,
+    ExposureType, UnparsedMetric, MetricFilter
 )
+from dbt.contracts.results import FreshnessStatus
 from dbt.node_types import NodeType
 from .utils import ContractTestCase
 
@@ -171,8 +174,8 @@ class TestFreshnessThreshold(ContractTestCase):
     ContractType = FreshnessThreshold
 
     def test_empty(self):
-        empty = self.ContractType(None, None)
-        self.assert_symmetric(empty, {})
+        empty = self.ContractType()
+        self.assert_symmetric(empty, {'error_after': {}, 'warn_after': {}})
         self.assertEqual(empty.status(float('Inf')), FreshnessStatus.Pass)
         self.assertEqual(empty.status(0), FreshnessStatus.Pass)
 
@@ -190,7 +193,8 @@ class TestFreshnessThreshold(ContractTestCase):
         error_seconds = timedelta(days=3).total_seconds()
         warn_seconds = timedelta(days=1).total_seconds()
         pass_seconds = timedelta(hours=3).total_seconds()
-        self.assertEqual(threshold.status(error_seconds), FreshnessStatus.Error)
+        self.assertEqual(threshold.status(
+            error_seconds), FreshnessStatus.Error)
         self.assertEqual(threshold.status(warn_seconds), FreshnessStatus.Warn)
         self.assertEqual(threshold.status(pass_seconds), FreshnessStatus.Pass)
         pickle.loads(pickle.dumps(threshold))
@@ -205,14 +209,12 @@ class TestFreshnessThreshold(ContractTestCase):
         )
         threshold = self.ContractType(
             warn_after=Time(count=18, period=TimePeriod.hour),
-            error_after=Time(count=2, period=TimePeriod.day),
+            error_after=Time(count=None, period=None),
         )
         self.assertEqual(threshold, t1.merged(t2))
 
-        error_seconds = timedelta(days=3).total_seconds()
         warn_seconds = timedelta(days=1).total_seconds()
         pass_seconds = timedelta(hours=3).total_seconds()
-        self.assertEqual(threshold.status(error_seconds), FreshnessStatus.Error)
         self.assertEqual(threshold.status(warn_seconds), FreshnessStatus.Warn)
         self.assertEqual(threshold.status(pass_seconds), FreshnessStatus.Pass)
 
@@ -243,8 +245,20 @@ class TestUnparsedSourceDefinition(ContractTestCase):
 
     def test_defaults(self):
         minimum = self.ContractType(name='foo')
-        self.assert_from_dict(minimum, {'name': 'foo'})
-        self.assert_to_dict(minimum, {'name': 'foo', 'description': '', 'freshness': {}, 'quoting': {}, 'tables': [], 'loader': ''})
+        from_dict = {'name': 'foo'}
+        to_dict = {
+            'name': 'foo',
+            'description': '',
+            'freshness': {'error_after': {}, 'warn_after': {}},
+            'quoting': {},
+            'tables': [],
+            'loader': '',
+            'meta': {},
+            'tags': [],
+            'config': {},
+        }
+        self.assert_from_dict(minimum, from_dict)
+        self.assert_to_dict(minimum, to_dict)
 
     def test_contents(self):
         empty = self.ContractType(
@@ -254,14 +268,18 @@ class TestUnparsedSourceDefinition(ContractTestCase):
             loader='some_loader',
             freshness=FreshnessThreshold(),
             tables=[],
+            meta={},
         )
         dct = {
             'name': 'foo',
             'description': 'a description',
             'quoting': {'database': False},
             'loader': 'some_loader',
-            'freshness': {},
+            'freshness': {'error_after': {}, 'warn_after': {}},
             'tables': [],
+            'meta': {},
+            'tags': [],
+            'config': {},
         }
         self.assert_symmetric(empty, dct)
 
@@ -290,29 +308,39 @@ class TestUnparsedSourceDefinition(ContractTestCase):
         to_dict = {
             'name': 'foo',
             'description': '',
+            'config': {},
             'loader': '',
-            'freshness': {},
+            'freshness': {'error_after': {}, 'warn_after': {}},
             'quoting': {},
+            'meta': {},
             'tables': [
                 {
                     'name': 'table1',
                     'description': '',
+                    'config': {},
+                    'docs': {'show': True},
                     'tests': [],
                     'columns': [],
                     'quoting': {},
-                    'external': {},
-                    'freshness': {},
+                    'freshness': {'error_after': {}, 'warn_after': {}},
+                    'meta': {},
+                    'tags': [],
                 },
                 {
                     'name': 'table2',
                     'description': 'table 2',
+                    'config': {},
+                    'docs': {'show': True},
                     'tests': [],
                     'columns': [],
                     'quoting': {'database': True},
-                    'external': {},
-                    'freshness': {},
+                    'freshness': {'error_after': {}, 'warn_after': {}},
+                    'meta': {},
+                    'tags': [],
                 },
             ],
+            'tags': [],
+            'config': {},
         }
         self.assert_from_dict(source, from_dict)
         self.assert_symmetric(source, to_dict)
@@ -359,44 +387,92 @@ class TestUnparsedNodeUpdate(ContractTestCase):
     ContractType = UnparsedNodeUpdate
 
     def test_defaults(self):
-        minimum = self.ContractType(name='foo')
-        from_dict = {'name': 'foo'}
-        to_dict = {'name': 'foo', 'columns': [], 'description': '', 'tests': []}
+        minimum = self.ContractType(
+            name='foo',
+            yaml_key='models',
+            original_file_path='/some/fake/path',
+            package_name='test',
+        )
+        from_dict = {
+            'name': 'foo',
+            'yaml_key': 'models',
+            'original_file_path': '/some/fake/path',
+            'package_name': 'test',
+        }
+        to_dict = {
+            'name': 'foo',
+            'yaml_key': 'models',
+            'original_file_path': '/some/fake/path',
+            'package_name': 'test',
+            'columns': [],
+            'description': '',
+            'docs': {'show': True},
+            'tests': [],
+            'meta': {},
+            'config': {},
+        }
         self.assert_from_dict(minimum, from_dict)
         self.assert_to_dict(minimum, to_dict)
 
     def test_contents(self):
         update = self.ContractType(
             name='foo',
+            yaml_key='models',
+            original_file_path='/some/fake/path',
+            package_name='test',
             description='a description',
             tests=['table_test'],
+            meta={'key': ['value1', 'value2']},
             columns=[
-                NamedTested(name='x', description='x description'),
-                NamedTested(
+                UnparsedColumn(
+                    name='x',
+                    description='x description',
+                    meta={'key2': 'value3'},
+                ),
+                UnparsedColumn(
                     name='y',
                     description='y description',
                     tests=[
                         'unique',
                         {'accepted_values': {'values': ['blue', 'green']}}
-                    ]
+                    ],
+                    meta={},
+                    tags=['a', 'b'],
                 ),
             ],
+            docs=Docs(show=False),
         )
         dct = {
             'name': 'foo',
+            'yaml_key': 'models',
+            'original_file_path': '/some/fake/path',
+            'package_name': 'test',
             'description': 'a description',
             'tests': ['table_test'],
+            'meta': {'key': ['value1', 'value2']},
             'columns': [
-                {'name': 'x', 'description': 'x description', 'tests': []},
+                {
+                    'name': 'x',
+                    'description': 'x description',
+                    'docs': {'show': True},
+                    'tests': [],
+                    'meta': {'key2': 'value3'},
+                    'tags': [],
+                },
                 {
                     'name': 'y',
                     'description': 'y description',
+                    'docs': {'show': True},
                     'tests': [
                         'unique',
                         {'accepted_values': {'values': ['blue', 'green']}}
                     ],
+                    'meta': {},
+                    'tags': ['a', 'b'],
                 },
             ],
+            'docs': {'show': False},
+            'config': {},
         }
         self.assert_symmetric(update, dct)
         pickle.loads(pickle.dumps(update))
@@ -404,55 +480,255 @@ class TestUnparsedNodeUpdate(ContractTestCase):
     def test_bad_test_type(self):
         dct = {
             'name': 'foo',
+            'yaml_key': 'models',
+            'original_file_path': '/some/fake/path',
+            'package_name': 'test',
             'description': 'a description',
             'tests': ['table_test'],
+            'meta': {'key': ['value1', 'value2']},
             'columns': [
-                {'name': 'x', 'description': 'x description', 'tests': []},
+                {
+                    'name': 'x',
+                    'description': 'x description',
+                    'docs': {'show': True},
+                    'tests': [],
+                    'meta': {'key2': 'value3'},
+                },
                 {
                     'name': 'y',
                     'description': 'y description',
+                    'docs': {'show': True},
                     'tests': [
                         100,
                         {'accepted_values': {'values': ['blue', 'green']}}
                     ],
+                    'meta': {},
+                    'yaml_key': 'models',
+                    'original_file_path': '/some/fake/path',
                 },
             ],
+            'docs': {'show': True},
         }
         self.assert_fails_validation(dct)
 
         dct = {
             'name': 'foo',
+            'yaml_key': 'models',
+            'original_file_path': '/some/fake/path',
+            'package_name': 'test',
             'description': 'a description',
             'tests': ['table_test'],
+            'meta': {'key': ['value1', 'value2']},
             'columns': [
                 # column missing a name
-                {'description': 'x description', 'tests': []},
+                {
+                    'description': 'x description',
+                    'docs': {'show': True},
+                    'tests': [],
+                    'meta': {'key2': 'value3'},
+
+                },
                 {
                     'name': 'y',
                     'description': 'y description',
+                    'docs': {'show': True},
                     'tests': [
                         'unique',
                         {'accepted_values': {'values': ['blue', 'green']}}
                     ],
+                    'meta': {},
+                    'yaml_key': 'models',
+                    'original_file_path': '/some/fake/path',
                 },
             ],
+            'docs': {'show': True},
         }
         self.assert_fails_validation(dct)
 
         # missing a name
         dct = {
+            'yaml_key': 'models',
+            'original_file_path': '/some/fake/path',
+            'package_name': 'test',
             'description': 'a description',
             'tests': ['table_test'],
+            'meta': {'key': ['value1', 'value2']},
             'columns': [
-                {'name': 'x', 'description': 'x description', 'tests': []},
+                {
+                    'name': 'x',
+                    'description': 'x description',
+                    'docs': {'show': True},
+                    'tests': [],
+                    'meta': {'key2': 'value3'},
+                },
                 {
                     'name': 'y',
                     'description': 'y description',
+                    'docs': {'show': True},
                     'tests': [
                         'unique',
                         {'accepted_values': {'values': ['blue', 'green']}}
                     ],
+                    'meta': {},
+                    'yaml_key': 'models',
+                    'original_file_path': '/some/fake/path',
                 },
             ],
+            'docs': {'show': True},
         }
         self.assert_fails_validation(dct)
+
+
+class TestUnparsedExposure(ContractTestCase):
+    ContractType = UnparsedExposure
+
+    def get_ok_dict(self):
+        return {
+            'name': 'my_exposure',
+            'type': 'dashboard',
+            'owner': {
+                'email': 'name@example.com',
+            },
+            'maturity': 'medium',
+            'meta': {'tool': 'my_tool'},
+            'tags': ['my_department'],
+            'url': 'https://example.com/dashboards/1',
+            'description': 'A exposure',
+            'depends_on': [
+                'ref("my_model")',
+                'source("raw", "source_table")',
+            ],
+        }
+
+    def test_ok(self):
+        exposure = self.ContractType(
+            name='my_exposure',
+            type=ExposureType.Dashboard,
+            owner=ExposureOwner(email='name@example.com'),
+            maturity=MaturityType.Medium,
+            url='https://example.com/dashboards/1',
+            description='A exposure',
+            meta={'tool': 'my_tool'},
+            tags=['my_department'],
+            depends_on=['ref("my_model")', 'source("raw", "source_table")'],
+        )
+        dct = self.get_ok_dict()
+        self.assert_symmetric(exposure, dct)
+        pickle.loads(pickle.dumps(exposure))
+
+    def test_ok_exposures(self):
+        for exposure_allowed in ('dashboard', 'notebook', 'analysis', 'ml', 'application'):
+            tst = self.get_ok_dict()
+            tst['type'] = exposure_allowed
+            assert self.ContractType.from_dict(tst).type == exposure_allowed
+
+    def test_bad_exposure(self):
+        # bad exposure: None isn't allowed
+        for exposure_not_allowed in (None, 'not an exposure'):
+            tst = self.get_ok_dict()
+            tst['type'] = exposure_not_allowed
+            self.assert_fails_validation(tst)
+
+    def test_no_exposure(self):
+        tst = self.get_ok_dict()
+        del tst['type']
+        self.assert_fails_validation(tst)
+
+    def test_ok_maturities(self):
+        for maturity_allowed in (None, 'low', 'medium', 'high'):
+            tst = self.get_ok_dict()
+            tst['maturity'] = maturity_allowed
+            assert self.ContractType.from_dict(
+                tst).maturity == maturity_allowed
+
+        tst = self.get_ok_dict()
+        del tst['maturity']
+        assert self.ContractType.from_dict(tst).maturity is None
+
+    def test_bad_maturity(self):
+        tst = self.get_ok_dict()
+        tst['maturity'] = 'invalid maturity'
+        self.assert_fails_validation(tst)
+
+    def test_bad_owner_missing_things(self):
+        tst = self.get_ok_dict()
+        del tst['owner']['email']
+        self.assert_fails_validation(tst)
+
+        del tst['owner']
+        self.assert_fails_validation(tst)
+
+    def test_bad_tags(self):
+        tst = self.get_ok_dict()
+        tst['tags'] = [123]
+        self.assert_fails_validation(tst)
+
+
+class TestUnparsedMetric(ContractTestCase):
+    ContractType = UnparsedMetric
+
+    def get_ok_dict(self):
+        return {
+            'name': 'new_customers',
+            'label': 'New Customers',
+            'model': 'ref("dim_customers")',
+            'description': 'New customers',
+            'type': 'count',
+            'sql': 'user_id',
+            'timestamp': 'signup_date',
+            'time_grains': ['day', 'week', 'month'],
+            'dimensions': ['plan', 'country'],
+            'filters': [
+                {
+                    "field": "is_paying",
+                    "value": "True",
+                    "operator": "=",
+                }
+            ],
+            'tags': [],
+            'meta': {
+                'is_okr': True
+            },
+        }
+
+    def test_ok(self):
+        metric = self.ContractType(
+            name='new_customers',
+            label='New Customers',
+            model='ref("dim_customers")',
+            description="New customers",
+            type='count',
+            sql="user_id",
+            timestamp="signup_date",
+            time_grains=['day', 'week', 'month'],
+            dimensions=['plan', 'country'],
+            filters=[MetricFilter(
+               field="is_paying",
+               value='True',
+               operator="=",
+            )],
+            meta={'is_okr': True},
+        )
+        dct = self.get_ok_dict()
+        self.assert_symmetric(metric, dct)
+        pickle.loads(pickle.dumps(metric))
+
+    def test_bad_metric_no_type(self):
+        tst = self.get_ok_dict()
+        del tst['type']
+        self.assert_fails_validation(tst)
+
+    def test_bad_metric_no_model(self):
+        tst = self.get_ok_dict()
+        tst['model'] = None
+        self.assert_fails_validation(tst)
+
+    def test_bad_filter_missing_things(self):
+        tst = self.get_ok_dict()
+        del tst['filters'][0]['operator']
+        self.assert_fails_validation(tst)
+
+    def test_bad_tags(self):
+        tst = self.get_ok_dict()
+        tst['tags'] = [123]
+        self.assert_fails_validation(tst)

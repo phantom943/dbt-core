@@ -1,20 +1,41 @@
 # never name this package "types", or mypy will crash in ugly ways
+
+# necessary for annotating constructors
+from __future__ import annotations
+
+from dataclasses import dataclass
 from datetime import timedelta
-from numbers import Real
-from typing import NewType, Dict
+from pathlib import Path
+from typing import Tuple, AbstractSet, Union
 
-from hologram import (
-    FieldEncoder, JsonSchemaMixin, JsonDict, ValidationError
+from dbt.dataclass_schema import (
+    dbtClassMixin,
+    ValidationError,
+    StrEnum,
 )
+from hologram import FieldEncoder, JsonDict
+from mashumaro.types import SerializableType
+from typing import Callable, cast, Generic, Optional, TypeVar
 
 
-Port = NewType('Port', int)
+class Port(int, SerializableType):
+    @classmethod
+    def _deserialize(cls, value: Union[int, str]) -> "Port":
+        try:
+            value = int(value)
+        except ValueError:
+            raise ValidationError(f"Cannot encode {value} into port number")
+
+        return Port(value)
+
+    def _serialize(self) -> int:
+        return self
 
 
 class PortEncoder(FieldEncoder):
     @property
     def json_schema(self):
-        return {'type': 'integer', 'minimum': 0, 'maximum': 65535}
+        return {"type": "integer", "minimum": 0, "maximum": 65535}
 
 
 class TimeDeltaFieldEncoder(FieldEncoder[timedelta]):
@@ -29,57 +50,91 @@ class TimeDeltaFieldEncoder(FieldEncoder[timedelta]):
         try:
             return timedelta(seconds=value)
         except TypeError:
-            raise ValidationError(
-                'cannot encode {} into timedelta'.format(value)
-            ) from None
+            raise ValidationError("cannot encode {} into timedelta".format(value)) from None
 
     @property
     def json_schema(self) -> JsonDict:
-        return {'type': 'number'}
+        return {"type": "number"}
 
 
-class RealEncoder(FieldEncoder):
+class PathEncoder(FieldEncoder):
+    def to_wire(self, value: Path) -> str:
+        return str(value)
+
+    def to_python(self, value) -> Path:
+        if isinstance(value, Path):
+            return value
+        try:
+            return Path(value)
+        except TypeError:
+            raise ValidationError("cannot encode {} into timedelta".format(value)) from None
+
     @property
-    def json_schema(self):
-        return {'type': 'number'}
+    def json_schema(self) -> JsonDict:
+        return {"type": "string"}
 
 
-class NoValue:
-    """Sometimes, you want a way to say none that isn't None"""
+class NVEnum(StrEnum):
+    novalue = "novalue"
+
     def __eq__(self, other):
-        return isinstance(other, NoValue)
+        return isinstance(other, NVEnum)
 
 
-class NoValueEncoder(FieldEncoder):
-    # the FieldEncoder class specifies a narrow range that only includes value
-    # types (str, float, None) but we want to support something extra
-    def to_wire(self, value: NoValue) -> Dict[str, str]:  # type: ignore
-        return {'novalue': 'novalue'}
+@dataclass
+class NoValue(dbtClassMixin):
+    """Sometimes, you want a way to say none that isn't None"""
 
-    def to_python(self, value) -> NoValue:
-        if (
-            not isinstance(value, dict) or
-            'novalue' not in value or
-            value['novalue'] != 'novalue'
-        ):
-            raise ValidationError('Got invalid NoValue: {}'.format(value))
-        return NoValue()
-
-    @property
-    def json_schema(self):
-        return {
-            'type': 'object',
-            'properties': {
-                'novalue': {
-                    'enum': ['novalue'],
-                }
-            }
-        }
+    novalue: NVEnum = NVEnum.novalue
 
 
-JsonSchemaMixin.register_field_encoders({
-    Port: PortEncoder(),
-    timedelta: TimeDeltaFieldEncoder(),
-    Real: RealEncoder(),
-    NoValue: NoValueEncoder(),
-})
+dbtClassMixin.register_field_encoders(
+    {
+        Port: PortEncoder(),
+        timedelta: TimeDeltaFieldEncoder(),
+        Path: PathEncoder(),
+    }
+)
+
+
+FQNPath = Tuple[str, ...]
+PathSet = AbstractSet[FQNPath]
+
+T = TypeVar("T")
+
+
+# A data type for representing lazily evaluated values.
+#
+# usage:
+# x = Lazy.defer(lambda: expensive_fn())
+# y = x.force()
+#
+# inspired by the purescript data type
+# https://pursuit.purescript.org/packages/purescript-lazy/5.0.0/docs/Data.Lazy
+@dataclass
+class Lazy(Generic[T]):
+    _f: Callable[[], T]
+    memo: Optional[T] = None
+
+    # constructor for lazy values
+    @classmethod
+    def defer(cls, f: Callable[[], T]) -> Lazy[T]:
+        return Lazy(f)
+
+    # workaround for open mypy issue:
+    # https://github.com/python/mypy/issues/6910
+    def _typed_eval_f(self) -> T:
+        return cast(Callable[[], T], getattr(self, "_f"))()
+
+    # evaluates the function if the value has not been memoized already
+    def force(self) -> T:
+        if self.memo is None:
+            self.memo = self._typed_eval_f()
+        return self.memo
+
+
+# This class is used in to_target_dict, so that accesses to missing keys
+# will return an empty string instead of Undefined
+class DictDefaultEmptyStr(dict):
+    def __getitem__(self, key):
+        return dict.get(self, key, "")

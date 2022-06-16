@@ -1,8 +1,9 @@
 from .utils import ContractTestCase
 
-from hologram import ValidationError
+from dbt.dataclass_schema import ValidationError
 
 from dbt.contracts.project import Project
+
 
 class TestProject(ContractTestCase):
     ContractType = Project
@@ -13,12 +14,14 @@ class TestProject(ContractTestCase):
             'version': '1.0',
             'profile': 'test',
             'project-root': '/usr/src/app',
+            'config-version': 2,
         }
-        project = Project(
+        project = self.ContractType(
             name='test',
             version='1.0',
             profile='test',
             project_root='/usr/src/app',
+            config_version=2,
         )
         self.assert_from_dict(project, dct)
 
@@ -28,6 +31,17 @@ class TestProject(ContractTestCase):
             'version': '1.0',
             'profile': 'test',
             'project-root': '/usr/src/app',
+            'config-version': 2,
         }
         with self.assertRaises(ValidationError):
-            Project.from_dict(dct)
+            self.ContractType.validate(dct)
+
+    def test_unsupported_version(self):
+        dct = {
+            'name': 'test',
+            'version': '1.0',
+            'profile': 'test',
+            'project-root': '/usr/src/app',
+        }
+        with self.assertRaises(Exception):
+            self.ContractType.from_dict(dct)

@@ -1,10 +1,11 @@
 import dbt.flags
-import dbt.ui.colors
+import dbt.ui
 
 import json
 import logging
 import os
 import sys
+import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,44 +13,36 @@ from typing import Optional, List, ContextManager, Callable, Dict, Any, Set
 
 import colorama
 import logbook
-from hologram import JsonSchemaMixin
+from dbt.dataclass_schema import dbtClassMixin
 
-# Colorama needs some help on windows because we're using logger.info
-# intead of print(). If the Windows env doesn't have a TERM var set,
-# then we should override the logging stream to use the colorama
-# converter. If the TERM var is set (as with Git Bash), then it's safe
-# to send escape characters and no log handler injection is needed.
-colorama_stdout = sys.stdout
-colorama_wrap = True
+# Colorama is needed for colored logs on Windows because we're using logger.info
+# intead of print(). If the Windows env doesn't have a TERM var set or it is set to None
+# (i.e. in the case of Git Bash on Windows- this emulates Unix), then it's safe to initialize
+# Colorama with wrapping turned on which allows us to strip ANSI sequences from stdout.
+# You can safely initialize Colorama for any OS and the coloring stays the same except
+# when piped to anoter process for Linux and MacOS, then it loses the coloring. To combat
+# that, we will just initialize Colorama when needed on Windows using a non-Unix terminal.
 
-colorama.init(wrap=colorama_wrap)
+if sys.platform == "win32" and (not os.getenv("TERM") or os.getenv("TERM") == "None"):
+    colorama.init(wrap=True)
 
-
-if sys.platform == 'win32' and not os.getenv('TERM'):
-    colorama_wrap = False
-    colorama_stdout = colorama.AnsiToWin32(sys.stdout).stream
-
-elif sys.platform == 'win32':
-    colorama_wrap = False
-
-colorama.init(wrap=colorama_wrap)
-
-
-STDOUT_LOG_FORMAT = '{record.message}'
-# TODO: can we change the time to just "{record.time:%Y-%m-%d %H:%M:%S.%f%z}"?
+STDOUT_LOG_FORMAT = "{record.message}"
 DEBUG_LOG_FORMAT = (
-    '{record.time:%Y-%m-%d %H:%M:%S%z},{record.time.microsecond:03} '
-    '({record.thread_name}): '
-    '{record.message}'
+    "{record.time:%Y-%m-%d %H:%M:%S.%f%z} " "({record.thread_name}): " "{record.message}"
 )
+
+SECRET_ENV_PREFIX = "DBT_ENV_SECRET_"
+
+
+def get_secret_env() -> List[str]:
+    return [v for k, v in os.environ.items() if k.startswith(SECRET_ENV_PREFIX)]
 
 
 ExceptionInformation = str
-Extras = Dict[str, Any]
 
 
 @dataclass
-class LogMessage(JsonSchemaMixin):
+class LogMessage(dbtClassMixin):
     timestamp: datetime
     message: str
     channel: str
@@ -57,7 +50,7 @@ class LogMessage(JsonSchemaMixin):
     levelname: str
     thread_name: str
     process: int
-    extra: Optional[Extras] = None
+    extra: Optional[Dict[str, Any]] = None
     exc_info: Optional[ExceptionInformation] = None
 
     @classmethod
@@ -95,8 +88,10 @@ class JsonFormatter(LogMessageFormatter):
         """Return a the record converted to LogMessage's JSON form"""
         # utils imports exceptions which imports logger...
         import dbt.utils
+
         log_message = super().__call__(record, handler)
-        return json.dumps(log_message.to_dict(), cls=dbt.utils.JSONEncoder)
+        dct = log_message.to_dict(omit_none=True)
+        return json.dumps(dct, cls=dbt.utils.JSONEncoder)
 
 
 class FormatterMixin:
@@ -116,6 +111,9 @@ class FormatterMixin:
         self.formatter_class = logbook.StringFormatter
         self.format_string = self._text_format_string
 
+    def reset(self):
+        raise NotImplementedError("reset() not implemented in FormatterMixin subclass")
+
 
 class OutputHandler(logbook.StreamHandler, FormatterMixin):
     """Output handler.
@@ -123,6 +121,7 @@ class OutputHandler(logbook.StreamHandler, FormatterMixin):
     The `format_string` parameter only changes the default text output, not
       debug mode or json.
     """
+
     def __init__(
         self,
         stream,
@@ -158,20 +157,16 @@ class OutputHandler(logbook.StreamHandler, FormatterMixin):
         if record.level < self.level:
             return False
         text_mode = self.formatter_class is logbook.StringFormatter
-        if text_mode and record.extra.get('json_only', False):
+        if text_mode and record.extra.get("json_only", False):
             return False
-        elif not text_mode and record.extra.get('text_only', False):
+        elif not text_mode and record.extra.get("text_only", False):
             return False
         else:
             return True
 
 
-def _redirect_std_logging():
-    logbook.compat.redirect_logging()
-
-
 def _root_channel(record: logbook.LogRecord) -> str:
-    return record.channel.split('.')[0]
+    return record.channel.split(".")[0]
 
 
 class Relevel(logbook.Processor):
@@ -189,7 +184,7 @@ class Relevel(logbook.Processor):
     def process(self, record):
         if _root_channel(record) in self.allowed:
             return
-        record.extra['old_level'] = record.level
+        record.extra["old_level"] = record.level
         # suppress logs at/below our min level by lowering them to NOTSET
         if record.level < self.min_level:
             record.level = logbook.NOTSET
@@ -201,22 +196,22 @@ class Relevel(logbook.Processor):
 
 class JsonOnly(logbook.Processor):
     def process(self, record):
-        record.extra['json_only'] = True
+        record.extra["json_only"] = True
 
 
 class TextOnly(logbook.Processor):
     def process(self, record):
-        record.extra['text_only'] = True
+        record.extra["text_only"] = True
 
 
 class TimingProcessor(logbook.Processor):
-    def __init__(self, timing_info: Optional[JsonSchemaMixin] = None):
+    def __init__(self, timing_info: Optional[dbtClassMixin] = None):
         self.timing_info = timing_info
         super().__init__()
 
     def process(self, record):
         if self.timing_info is not None:
-            record.extra['timing_info'] = self.timing_info.to_dict()
+            record.extra["timing_info"] = self.timing_info.to_dict(omit_none=True)
 
 
 class DbtProcessState(logbook.Processor):
@@ -225,12 +220,9 @@ class DbtProcessState(logbook.Processor):
         super().__init__()
 
     def process(self, record):
-        overwrite = (
-            'run_state' not in record.extra or
-            record.extra['run_state'] == 'internal'
-        )
+        overwrite = "run_state" not in record.extra or record.extra["run_state"] == "internal"
         if overwrite:
-            record.extra['run_state'] = self.value
+            record.extra["run_state"] = self.value
 
 
 class DbtModelState(logbook.Processor):
@@ -244,7 +236,7 @@ class DbtModelState(logbook.Processor):
 
 class DbtStatusMessage(logbook.Processor):
     def process(self, record):
-        record.extra['is_status_message'] = True
+        record.extra["is_status_message"] = True
 
 
 class UniqueID(logbook.Processor):
@@ -253,7 +245,7 @@ class UniqueID(logbook.Processor):
         super().__init__()
 
     def process(self, record):
-        record.extra['unique_id'] = self.unique_id
+        record.extra["unique_id"] = self.unique_id
 
 
 class NodeCount(logbook.Processor):
@@ -262,7 +254,7 @@ class NodeCount(logbook.Processor):
         super().__init__()
 
     def process(self, record):
-        record.extra['node_count'] = self.node_count
+        record.extra["node_count"] = self.node_count
 
 
 class NodeMetadata(logbook.Processor):
@@ -282,25 +274,26 @@ class NodeMetadata(logbook.Processor):
 
     def process(self, record):
         self.process_keys(record)
-        record.extra['node_index'] = self.index
+        record.extra["node_index"] = self.index
 
 
 class ModelMetadata(NodeMetadata):
     def mapping_keys(self):
         return [
-            ('alias', 'node_alias'),
-            ('schema', 'node_schema'),
-            ('database', 'node_database'),
-            ('original_file_path', 'node_path'),
-            ('name', 'node_name'),
-            ('resource_type', 'resource_type'),
+            ("alias", "node_alias"),
+            ("schema", "node_schema"),
+            ("database", "node_database"),
+            ("original_file_path", "node_path"),
+            ("name", "node_name"),
+            ("resource_type", "resource_type"),
+            ("depends_on_nodes", "depends_on"),
         ]
 
     def process_config(self, record):
-        if hasattr(self.node, 'config'):
-            materialized = getattr(self.node.config, 'materialized', None)
+        if hasattr(self.node, "config"):
+            materialized = getattr(self.node.config, "materialized", None)
             if materialized is not None:
-                record.extra['node_materialized'] = materialized
+                record.extra["node_materialized"] = materialized
 
     def process(self, record):
         super().process(record)
@@ -310,8 +303,8 @@ class ModelMetadata(NodeMetadata):
 class HookMetadata(NodeMetadata):
     def mapping_keys(self):
         return [
-            ('name', 'node_name'),
-            ('resource_type', 'resource_type'),
+            ("name", "node_name"),
+            ("resource_type", "resource_type"),
         ]
 
 
@@ -325,37 +318,41 @@ class TimestampNamed(logbook.Processor):
         record.extra[self.name] = datetime.utcnow().isoformat()
 
 
-logger = logbook.Logger('dbt')
+class ScrubSecrets(logbook.Processor):
+    def process(self, record):
+        for secret in get_secret_env():
+            record.message = str(record.message).replace(secret, "*****")
+
+
+logger = logbook.Logger("dbt")
 # provide this for the cache, disabled by default
-CACHE_LOGGER = logbook.Logger('dbt.cache')
+CACHE_LOGGER = logbook.Logger("dbt.cache")
 CACHE_LOGGER.disable()
 
-warnings.filterwarnings("ignore", category=ResourceWarning,
-                        message="unclosed.*<socket.socket.*>")
+warnings.filterwarnings("ignore", category=ResourceWarning, message="unclosed.*<socket.socket.*>")
 
 initialized = False
 
 
 def make_log_dir_if_missing(log_dir):
     import dbt.clients.system
+
     dbt.clients.system.make_directory(log_dir)
 
 
 class DebugWarnings(logbook.compat.redirected_warnings):
-    """Log warnings, except send them to 'debug' instead of 'warning' level.
-    """
+    """Log warnings, except send them to 'debug' instead of 'warning' level."""
+
     def make_record(self, message, exception, filename, lineno):
         rv = super().make_record(message, exception, filename, lineno)
         rv.level = logbook.DEBUG
-        rv.extra['from_warnings'] = True
+        rv.extra["from_warnings"] = True
         return rv
 
 
 # push Python warnings to debug level logs. This will suppress all import-time
 # warnings.
 DebugWarnings().__enter__()
-# redirect stdlib logging to logbook
-_redirect_std_logging()
 
 
 class DelayedFileHandler(logbook.RotatingFileHandler, FormatterMixin):
@@ -372,7 +369,7 @@ class DelayedFileHandler(logbook.RotatingFileHandler, FormatterMixin):
         self._msg_buffer: Optional[List[logbook.LogRecord]] = []
         # if we get 1k messages without a logfile being set, something is wrong
         self._bufmax = 1000
-        self._log_path = None
+        self._log_path: Optional[str] = None
         # we need the base handler class' __init__ to run so handling works
         logbook.Handler.__init__(self, level, filter, bubble)
         if log_dir is not None:
@@ -399,14 +396,14 @@ class DelayedFileHandler(logbook.RotatingFileHandler, FormatterMixin):
         if self.disabled:
             return
 
-        assert not self.initialized, 'set_path called after being set'
+        assert not self.initialized, "set_path called after being set"
 
         if log_dir is None:
             self.disabled = True
             return
 
         make_log_dir_if_missing(log_dir)
-        log_path = os.path.join(log_dir, 'dbt.log')
+        log_path = os.path.join(log_dir, "dbt.log.legacy")  # TODO hack for now
         self._super_init(log_path)
         self._replay_buffered()
         self._log_path = log_path
@@ -426,6 +423,7 @@ class DelayedFileHandler(logbook.RotatingFileHandler, FormatterMixin):
         FormatterMixin.__init__(self, DEBUG_LOG_FORMAT)
 
     def _replay_buffered(self):
+        assert self._msg_buffer is not None, "_msg_buffer should never be None in _replay_buffered"
         for record in self._msg_buffer:
             super().emit(record)
         self._msg_buffer = None
@@ -433,8 +431,8 @@ class DelayedFileHandler(logbook.RotatingFileHandler, FormatterMixin):
     def format(self, record: logbook.LogRecord) -> str:
         msg = super().format(record)
         subbed = str(msg)
-        for escape_sequence in dbt.ui.colors.COLORS.values():
-            subbed = subbed.replace(escape_sequence, '')
+        for escape_sequence in dbt.ui.COLORS.values():
+            subbed = subbed.replace(escape_sequence, "")
         return subbed
 
     def emit(self, record: logbook.LogRecord):
@@ -446,33 +444,39 @@ class DelayedFileHandler(logbook.RotatingFileHandler, FormatterMixin):
         elif self.initialized:
             super().emit(record)
         else:
-            assert self._msg_buffer is not None, \
-                '_msg_buffer should never be None if _log_path is set'
+            assert (
+                self._msg_buffer is not None
+            ), "_msg_buffer should never be None if _log_path is set"
             self._msg_buffer.append(record)
-            assert len(self._msg_buffer) < self._bufmax, \
-                'too many messages received before initilization!'
+            assert (
+                len(self._msg_buffer) < self._bufmax
+            ), "too many messages received before initilization!"
 
 
 class LogManager(logbook.NestedSetup):
-    def __init__(self, stdout=colorama_stdout, stderr=sys.stderr):
+    def __init__(self, stdout=sys.stdout, stderr=sys.stderr):
         self.stdout = stdout
         self.stderr = stderr
         self._null_handler = logbook.NullHandler()
         self._output_handler = OutputHandler(self.stdout)
         self._file_handler = DelayedFileHandler()
-        self._relevel_processor = Relevel(allowed=['dbt', 'werkzeug'])
-        self._state_processor = DbtProcessState('internal')
-        # keep track of wheter we've already entered to decide if we should
+        self._relevel_processor = Relevel(allowed=["dbt", "werkzeug"])
+        self._state_processor = DbtProcessState("internal")
+        self._scrub_processor = ScrubSecrets()
+        # keep track of whether we've already entered to decide if we should
         # be actually pushing. This allows us to log in main() and also
         # support entering dbt execution via handle_and_check.
         self._stack_depth = 0
-        super().__init__([
-            self._null_handler,
-            self._output_handler,
-            self._file_handler,
-            self._relevel_processor,
-            self._state_processor,
-        ])
+        super().__init__(
+            [
+                self._null_handler,
+                self._output_handler,
+                self._file_handler,
+                self._relevel_processor,
+                self._state_processor,
+                self._scrub_processor,
+            ]
+        )
 
     def push_application(self):
         self._stack_depth += 1
@@ -488,8 +492,7 @@ class LogManager(logbook.NestedSetup):
         self.add_handler(logbook.NullHandler())
 
     def add_handler(self, handler):
-        """add an handler to the log manager that runs before the file handler.
-        """
+        """add an handler to the log manager that runs before the file handler."""
         self.objects.append(handler)
 
     # this is used by `dbt ls` to allow piping stdout to jq, etc
@@ -547,13 +550,14 @@ log_manager = LogManager()
 
 
 def log_cache_events(flag):
-    """Set the cache logger to propagate its messages based on the given flag.
-    """
+    """Set the cache logger to propagate its messages based on the given flag."""
     # the flag is True if we should log, and False if we shouldn't, so disabled
     # is the inverse.
     CACHE_LOGGER.disabled = not flag
 
 
+if not dbt.flags.ENABLE_LEGACY_LOGGER:
+    logger.disable()
 GLOBAL_LOGGER = logger
 
 
@@ -572,7 +576,7 @@ class ListLogHandler(LogMessageHandler):
         level: int = logbook.NOTSET,
         filter: Callable = None,
         bubble: bool = False,
-        lst: Optional[List[LogMessage]] = None
+        lst: Optional[List[LogMessage]] = None,
     ) -> None:
         super().__init__(level, filter, bubble)
         if lst is None:
@@ -581,7 +585,7 @@ class ListLogHandler(LogMessageHandler):
 
     def should_handle(self, record):
         """Only ever emit dbt-sourced log messages to the ListHandler."""
-        if _root_channel(record) != 'dbt':
+        if _root_channel(record) != "dbt":
             return False
         return super().should_handle(record)
 
@@ -590,21 +594,48 @@ class ListLogHandler(LogMessageHandler):
         self.records.append(as_dict)
 
 
-# we still need to use logging to suppress these or pytest captures them
-logging.getLogger('botocore').setLevel(logging.ERROR)
-logging.getLogger('requests').setLevel(logging.ERROR)
-logging.getLogger('urllib3').setLevel(logging.ERROR)
-logging.getLogger('google').setLevel(logging.ERROR)
-logging.getLogger('snowflake.connector').setLevel(logging.ERROR)
-logging.getLogger('parsedatetime').setLevel(logging.ERROR)
-# want to see werkzeug logs about errors
-logging.getLogger('werkzeug').setLevel(logging.ERROR)
+def _env_log_level(var_name: str) -> int:
+    # convert debugging environment variable name to a log level
+    if dbt.flags.env_set_truthy(var_name):
+        return logging.DEBUG
+    else:
+        return logging.ERROR
+
+
+LOG_LEVEL_GOOGLE = _env_log_level("DBT_GOOGLE_DEBUG_LOGGING")
+LOG_LEVEL_SNOWFLAKE = _env_log_level("DBT_SNOWFLAKE_CONNECTOR_DEBUG_LOGGING")
+LOG_LEVEL_BOTOCORE = _env_log_level("DBT_BOTOCORE_DEBUG_LOGGING")
+LOG_LEVEL_HTTP = _env_log_level("DBT_HTTP_DEBUG_LOGGING")
+LOG_LEVEL_WERKZEUG = _env_log_level("DBT_WERKZEUG_DEBUG_LOGGING")
+
+logging.getLogger("botocore").setLevel(LOG_LEVEL_BOTOCORE)
+logging.getLogger("requests").setLevel(LOG_LEVEL_HTTP)
+logging.getLogger("urllib3").setLevel(LOG_LEVEL_HTTP)
+logging.getLogger("google").setLevel(LOG_LEVEL_GOOGLE)
+logging.getLogger("snowflake.connector").setLevel(LOG_LEVEL_SNOWFLAKE)
+
+logging.getLogger("parsedatetime").setLevel(logging.ERROR)
+logging.getLogger("werkzeug").setLevel(LOG_LEVEL_WERKZEUG)
 
 
 def list_handler(
     lst: Optional[List[LogMessage]],
     level=logbook.NOTSET,
 ) -> ContextManager:
-    """Return a context manager that temporarly attaches a list to the logger.
-    """
+    """Return a context manager that temporarily attaches a list to the logger."""
     return ListLogHandler(lst=lst, level=level, bubble=True)
+
+
+def get_timestamp():
+    return time.strftime("%H:%M:%S")
+
+
+def timestamped_line(msg: str) -> str:
+    return "{} | {}".format(get_timestamp(), msg)
+
+
+def print_timestamped_line(msg: str, use_color: Optional[str] = None):
+    if use_color is not None:
+        msg = dbt.ui.color(msg, use_color)
+
+    GLOBAL_LOGGER.info(timestamped_line(msg))

@@ -6,7 +6,8 @@ from typing import List, Optional, Generic, TypeVar
 
 from dbt.clients import system
 from dbt.contracts.project import ProjectPackageMetadata
-from dbt.logger import GLOBAL_LOGGER as logger
+from dbt.events.functions import fire_event
+from dbt.events.types import DepsSetDownloadDirectory
 
 DOWNLOADS_PATH = None
 
@@ -22,16 +23,16 @@ def downloads_directory():
     # the user might have set an environment variable. Set it to that, and do
     # not remove it when finished.
     if DOWNLOADS_PATH is None:
-        DOWNLOADS_PATH = os.getenv('DBT_DOWNLOADS_DIR')
+        DOWNLOADS_PATH = os.getenv("DBT_DOWNLOADS_DIR")
         remove_downloads = False
     # if we are making a per-run temp directory, remove it at the end of
     # successful runs
     if DOWNLOADS_PATH is None:
-        DOWNLOADS_PATH = tempfile.mkdtemp(prefix='dbt-downloads-')
+        DOWNLOADS_PATH = tempfile.mkdtemp(prefix="dbt-downloads-")
         remove_downloads = True
 
     system.make_directory(DOWNLOADS_PATH)
-    logger.debug("Set downloads directory='{}'".format(DOWNLOADS_PATH))
+    fire_event(DepsSetDownloadDirectory(path=DOWNLOADS_PATH))
 
     yield DOWNLOADS_PATH
 
@@ -62,14 +63,14 @@ class PinnedPackage(BasePackage):
         if not version:
             return self.name
 
-        return '{}@{}'.format(self.name, version)
+        return "{}@{}".format(self.name, version)
 
     @abc.abstractmethod
     def get_version(self) -> Optional[str]:
         raise NotImplementedError
 
     @abc.abstractmethod
-    def _fetch_metadata(self, project):
+    def _fetch_metadata(self, project, renderer):
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -80,22 +81,25 @@ class PinnedPackage(BasePackage):
     def nice_version_name(self):
         raise NotImplementedError
 
-    def fetch_metadata(self, project):
+    def fetch_metadata(self, project, renderer):
         if not self._cached_metadata:
-            self._cached_metadata = self._fetch_metadata(project)
+            self._cached_metadata = self._fetch_metadata(project, renderer)
         return self._cached_metadata
 
-    def get_project_name(self, project):
-        metadata = self.fetch_metadata(project)
+    def get_project_name(self, project, renderer):
+        metadata = self.fetch_metadata(project, renderer)
         return metadata.name
 
-    def get_installation_path(self, project):
-        dest_dirname = self.get_project_name(project)
-        return os.path.join(project.modules_path, dest_dirname)
+    def get_installation_path(self, project, renderer):
+        dest_dirname = self.get_project_name(project, renderer)
+        return os.path.join(project.packages_install_path, dest_dirname)
+
+    def get_subdirectory(self):
+        return None
 
 
-SomePinned = TypeVar('SomePinned', bound=PinnedPackage)
-SomeUnpinned = TypeVar('SomeUnpinned', bound='UnpinnedPackage')
+SomePinned = TypeVar("SomePinned", bound=PinnedPackage)
+SomeUnpinned = TypeVar("SomeUnpinned", bound="UnpinnedPackage")
 
 
 class UnpinnedPackage(Generic[SomePinned], BasePackage):

@@ -1,32 +1,21 @@
 import os
 from typing import List
 
-from hologram import ValidationError
+from dbt.dataclass_schema import ValidationError
 
-from dbt.contracts.graph.parsed import (
-    IntermediateSnapshotNode, ParsedSnapshotNode
-)
-from dbt.exceptions import (
-    CompilationException, validator_error_message
-)
+from dbt.contracts.graph.parsed import IntermediateSnapshotNode, ParsedSnapshotNode
+from dbt.exceptions import ParsingException, validator_error_message
 from dbt.node_types import NodeType
 from dbt.parser.base import SQLParser
-from dbt.parser.search import (
-    FilesystemSearcher, BlockContents, BlockSearcher, FileBlock
-)
+from dbt.parser.search import BlockContents, BlockSearcher, FileBlock
 from dbt.utils import split_path
 
 
-class SnapshotParser(
-    SQLParser[IntermediateSnapshotNode, ParsedSnapshotNode]
-):
-    def get_paths(self):
-        return FilesystemSearcher(
-            self.project, self.project.snapshot_paths, '.sql'
-        )
-
+class SnapshotParser(SQLParser[IntermediateSnapshotNode, ParsedSnapshotNode]):
     def parse_from_dict(self, dct, validate=True) -> IntermediateSnapshotNode:
-        return IntermediateSnapshotNode.from_dict(dct, validate=validate)
+        if validate:
+            IntermediateSnapshotNode.validate(dct)
+        return IntermediateSnapshotNode.from_dict(dct)
 
     @property
     def resource_type(self) -> NodeType:
@@ -66,21 +55,24 @@ class SnapshotParser(
 
     def transform(self, node: IntermediateSnapshotNode) -> ParsedSnapshotNode:
         try:
-            parsed_node = ParsedSnapshotNode.from_dict(node.to_dict())
+            # The config_call_dict is not serialized, because normally
+            # it is not needed after parsing. But since the snapshot node
+            # does this extra to_dict, save and restore it, to keep
+            # the model config when there is also schema config.
+            config_call_dict = node.config_call_dict
+            dct = node.to_dict(omit_none=True)
+            parsed_node = ParsedSnapshotNode.from_dict(dct)
+            parsed_node.config_call_dict = config_call_dict
             self.set_snapshot_attributes(parsed_node)
             return parsed_node
         except ValidationError as exc:
-            raise CompilationException(validator_error_message(exc), node)
+            raise ParsingException(validator_error_message(exc), node)
 
     def parse_file(self, file_block: FileBlock) -> None:
         blocks = BlockSearcher(
             source=[file_block],
-            allowed_blocks={'snapshot'},
+            allowed_blocks={"snapshot"},
             source_tag_factory=BlockContents,
         )
         for block in blocks:
             self.parse_node(block)
-        # in case there are no snapshots declared, we still want to mark this
-        # file as seen. But after we've finished, because we don't want to add
-        # files with syntax errors
-        self.results.get_file(file_block.file)

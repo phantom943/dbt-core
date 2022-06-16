@@ -1,11 +1,14 @@
 import json
 import os
+import io
 import random
 import shutil
+import sys
 import tempfile
 import time
 import traceback
 import unittest
+import warnings
 from contextlib import contextmanager
 from datetime import datetime
 from functools import wraps
@@ -15,12 +18,22 @@ import yaml
 from unittest.mock import patch
 
 import dbt.main as dbt
-import dbt.flags as flags
+from dbt import flags
+from dbt.deprecations import reset_deprecations
 from dbt.adapters.factory import get_adapter, reset_adapters, register_adapter
 from dbt.clients.jinja import template_cache
 from dbt.config import RuntimeConfig
-from dbt.context import common
-from dbt.logger import GLOBAL_LOGGER as logger, log_manager
+from dbt.context import providers
+from dbt.logger import log_manager
+from dbt.events.functions import (
+    capture_stdout_logs, fire_event, setup_event_logger, stop_capture_stdout_logs
+)
+from dbt.events.test_types import (
+    IntegrationTestInfo,
+    IntegrationTestDebug,
+    IntegrationTestException
+)
+from dbt.contracts.graph.manifest import Manifest
 
 
 INITIAL_ROOT = os.getcwd()
@@ -53,27 +66,17 @@ class Normalized:
         return normalize(self.value) == normalize(other)
 
 
-class FakeArgs:
-    def __init__(self):
-        self.threads = 1
-        self.data = False
-        self.schema = True
-        self.full_refresh = False
-        self.models = None
-        self.exclude = None
-        self.single_threaded = False
-
-
 class TestArgs:
     def __init__(self, kwargs):
         self.which = 'run'
         self.single_threaded = False
         self.profiles_dir = None
+        self.project_dir = None
         self.__dict__.update(kwargs)
 
 
 def _profile_from_test_name(test_name):
-    adapter_names = ('postgres', 'snowflake', 'redshift', 'bigquery', 'presto')
+    adapter_names = ('postgres', 'presto')
     adapters_in_name = sum(x in test_name for x in adapter_names)
     if adapters_in_name != 1:
         raise ValueError(
@@ -121,14 +124,19 @@ class DBTIntegrationTest(unittest.TestCase):
     CREATE_SCHEMA_STATEMENT = 'CREATE SCHEMA {}'
     DROP_SCHEMA_STATEMENT = 'DROP SCHEMA IF EXISTS {} CASCADE'
 
-    prefix = "test{}{:04}".format(int(time.time()), random.randint(0, 9999))
+    _randint = random.randint(0, 9999)
+    _runtime_timedelta = (datetime.utcnow() - datetime(1970, 1, 1, 0, 0, 0))
+    _runtime = (
+        (int(_runtime_timedelta.total_seconds() * 1e6)) +
+        _runtime_timedelta.microseconds
+    )
+
+    prefix = f'test{_runtime}{_randint:04}'
     setup_alternate_db = False
 
     @property
     def database_host(self):
-        if os.name == 'nt':
-            return 'localhost'
-        return 'database'
+        return os.getenv('POSTGRES_TEST_HOST', 'localhost')
 
     def postgres_profile(self):
         return {
@@ -141,42 +149,20 @@ class DBTIntegrationTest(unittest.TestCase):
                         'type': 'postgres',
                         'threads': 4,
                         'host': self.database_host,
-                        'port': 5432,
-                        'user': 'root',
-                        'pass': 'password',
-                        'dbname': 'dbt',
+                        'port': int(os.getenv('POSTGRES_TEST_PORT', 5432)),
+                        'user': os.getenv('POSTGRES_TEST_USER', 'root'),
+                        'pass': os.getenv('POSTGRES_TEST_PASS', 'password'),
+                        'dbname': os.getenv('POSTGRES_TEST_DATABASE', 'dbt'),
                         'schema': self.unique_schema()
                     },
                     'noaccess': {
                         'type': 'postgres',
                         'threads': 4,
                         'host': self.database_host,
-                        'port': 5432,
+                        'port': int(os.getenv('POSTGRES_TEST_PORT', 5432)),
                         'user': 'noaccess',
                         'pass': 'password',
-                        'dbname': 'dbt',
-                        'schema': self.unique_schema()
-                    }
-                },
-                'target': 'default2'
-            }
-        }
-
-    def redshift_profile(self):
-        return {
-            'config': {
-                'send_anonymous_usage_stats': False
-            },
-            'test': {
-                'outputs': {
-                    'default2': {
-                        'type': 'redshift',
-                        'threads': 1,
-                        'host': os.getenv('REDSHIFT_TEST_HOST'),
-                        'port': os.getenv('REDSHIFT_TEST_PORT'),
-                        'user': os.getenv('REDSHIFT_TEST_USER'),
-                        'pass': os.getenv('REDSHIFT_TEST_PASS'),
-                        'dbname': os.getenv('REDSHIFT_TEST_DBNAME'),
+                        'dbname': os.getenv('POSTGRES_TEST_DATABASE', 'dbt'),
                         'schema': self.unique_schema()
                     }
                 },
@@ -210,30 +196,19 @@ class DBTIntegrationTest(unittest.TestCase):
                         'database': os.getenv('SNOWFLAKE_TEST_DATABASE'),
                         'schema': self.unique_schema(),
                         'warehouse': os.getenv('SNOWFLAKE_TEST_WAREHOUSE'),
-                    }
-                },
-                'target': 'default2'
-            }
-        }
-
-    def bigquery_profile(self):
-        credentials_json_str = os.getenv('BIGQUERY_SERVICE_ACCOUNT_JSON').replace("'", '')
-        credentials = json.loads(credentials_json_str)
-        project_id = credentials.get('project_id')
-
-        return {
-            'config': {
-                'send_anonymous_usage_stats': False
-            },
-            'test': {
-                'outputs': {
-                    'default2': {
-                        'type': 'bigquery',
-                        'method': 'service-account-json',
-                        'threads': 1,
-                        'project': project_id,
-                        'keyfile_json': credentials,
+                    },
+                    'oauth': {
+                        'type': 'snowflake',
+                        'threads': 4,
+                        'account': os.getenv('SNOWFLAKE_TEST_ACCOUNT'),
+                        'user': os.getenv('SNOWFLAKE_TEST_USER'),
+                        'oauth_client_id': os.getenv('SNOWFLAKE_TEST_OAUTH_CLIENT_ID'),
+                        'oauth_client_secret': os.getenv('SNOWFLAKE_TEST_OAUTH_CLIENT_SECRET'),
+                        'token': os.getenv('SNOWFLAKE_TEST_OAUTH_REFRESH_TOKEN'),
+                        'database': os.getenv('SNOWFLAKE_TEST_DATABASE'),
                         'schema': self.unique_schema(),
+                        'warehouse': os.getenv('SNOWFLAKE_TEST_WAREHOUSE'),
+                        'authenticator': 'oauth',
                     },
                 },
                 'target': 'default2'
@@ -265,6 +240,10 @@ class DBTIntegrationTest(unittest.TestCase):
     def packages_config(self):
         return None
 
+    @property
+    def selectors_config(self):
+        return None
+
     def unique_schema(self):
         schema = self.schema
 
@@ -284,21 +263,11 @@ class DBTIntegrationTest(unittest.TestCase):
 
     @property
     def alternative_database(self):
-        if self.adapter_type == 'bigquery':
-            return os.environ['BIGQUERY_TEST_ALT_DATABASE']
-        elif self.adapter_type == 'snowflake':
-            return os.environ['SNOWFLAKE_TEST_ALT_DATABASE']
         return None
 
     def get_profile(self, adapter_type):
         if adapter_type == 'postgres':
             return self.postgres_profile()
-        elif adapter_type == 'snowflake':
-            return self.snowflake_profile()
-        elif adapter_type == 'bigquery':
-            return self.bigquery_profile()
-        elif adapter_type == 'redshift':
-            return self.redshift_profile()
         elif adapter_type == 'presto':
             return self.presto_profile()
         else:
@@ -317,16 +286,35 @@ class DBTIntegrationTest(unittest.TestCase):
                 os.symlink(src, tst)
         os.symlink(self._logs_dir, os.path.join(self.test_root_dir, 'logs'))
 
+    @property
+    def test_root_realpath(self):
+        if sys.platform == 'darwin':
+            return os.path.realpath(self.test_root_dir)
+        else:
+            return self.test_root_dir
+
+    def _generate_test_root_dir(self):
+        return normalize(tempfile.mkdtemp(prefix='dbt-int-test-'))
+
     def setUp(self):
+        # Logbook warnings are ignored so we don't have to fork logbook to support python 3.10.
+        # This _only_ works for tests in `test/integration`.
+        warnings.filterwarnings(
+            "ignore",
+            category=DeprecationWarning,
+            module="logbook"
+        )
         self.dbt_core_install_root = os.path.dirname(dbt.__file__)
         log_manager.reset_handlers()
         self.initial_dir = INITIAL_ROOT
         os.chdir(self.initial_dir)
         # before we go anywhere, collect the initial path info
         self._logs_dir = os.path.join(self.initial_dir, 'logs', self.prefix)
+        setup_event_logger(self._logs_dir)
         _really_makedirs(self._logs_dir)
         self.test_original_source_path = _pytest_get_test_root()
-        self.test_root_dir = normalize(tempfile.mkdtemp(prefix='dbt-int-test-'))
+        self.test_root_dir = self._generate_test_root_dir()
+
         os.chdir(self.test_root_dir)
         try:
             self._symlink_test_folders()
@@ -337,7 +325,7 @@ class DBTIntegrationTest(unittest.TestCase):
                 'test_original_source_path={0.test_original_source_path}',
                 'test_root_dir={0.test_root_dir}'
             )).format(self)
-            logger.exception(msg)
+            fire_event(IntegrationTestException(msg=msg))
 
             # if logging isn't set up, I still really want this message.
             print(msg)
@@ -346,12 +334,13 @@ class DBTIntegrationTest(unittest.TestCase):
             raise
 
         self._created_schemas = set()
-        flags.reset()
+        reset_deprecations()
         template_cache.clear()
 
         self.use_profile(self._pick_profile())
         self.use_default_project()
         self.set_packages()
+        self.set_selectors()
         self.load_config()
 
     def use_default_project(self, overrides=None):
@@ -359,8 +348,9 @@ class DBTIntegrationTest(unittest.TestCase):
         base_project_config = {
             'name': 'test',
             'version': '1.0',
+            'config-version': 2,
             'test-paths': [],
-            'source-paths': [self.models],
+            'model-paths': [self.models],
             'profile': 'test',
         }
 
@@ -384,6 +374,7 @@ class DBTIntegrationTest(unittest.TestCase):
         if not os.path.exists(self.test_root_dir):
             os.makedirs(self.test_root_dir)
 
+        flags.PROFILES_DIR = self.test_root_dir
         profiles_path = os.path.join(self.test_root_dir, 'profiles.yml')
         with open(profiles_path, 'w') as f:
             yaml.safe_dump(profile_config, f, default_flow_style=True)
@@ -393,6 +384,11 @@ class DBTIntegrationTest(unittest.TestCase):
         if self.packages_config is not None:
             with open('packages.yml', 'w') as f:
                 yaml.safe_dump(self.packages_config, f, default_flow_style=True)
+
+    def set_selectors(self):
+        if self.selectors_config is not None:
+            with open('selectors.yml', 'w') as f:
+                yaml.safe_dump(self.selectors_config, f, default_flow_style=True)
 
     def load_config(self):
         # we've written our profile and project. Now we want to instantiate a
@@ -439,8 +435,8 @@ class DBTIntegrationTest(unittest.TestCase):
         try:
             shutil.rmtree(self.test_root_dir)
         except EnvironmentError:
-            logger.exception('Could not clean up after test - {} not removable'
-                             .format(self.test_root_dir))
+            msg = f"Could not clean up after test - {self.test_root_dir} not removable"
+            fire_event(IntegrationTestException(msg=msg))
 
     def _get_schema_fqn(self, database, schema):
         schema_fqn = self.quote_as_configured(schema, 'schema')
@@ -450,16 +446,14 @@ class DBTIntegrationTest(unittest.TestCase):
         return schema_fqn
 
     def _create_schema_named(self, database, schema):
-        if self.adapter_type == 'bigquery':
-            self.adapter.create_schema(database, schema)
-        else:
-            schema_fqn = self._get_schema_fqn(database, schema)
-            self.run_sql(self.CREATE_SCHEMA_STATEMENT.format(schema_fqn))
-            self._created_schemas.add(schema_fqn)
+        schema_fqn = self._get_schema_fqn(database, schema)
+        self.run_sql(self.CREATE_SCHEMA_STATEMENT.format(schema_fqn))
+        self._created_schemas.add(schema_fqn)
 
     def _drop_schema_named(self, database, schema):
-        if self.adapter_type == 'bigquery' or self.adapter_type == 'presto':
-            self.adapter.drop_schema(database, schema)
+        if self.adapter_type == 'presto':
+            relation = self.adapter.Relation.create(database=database, schema=schema)
+            self.adapter.drop_schema(relation)
         else:
             schema_fqn = self._get_schema_fqn(database, schema)
             self.run_sql(self.DROP_SCHEMA_STATEMENT.format(schema_fqn))
@@ -473,7 +467,7 @@ class DBTIntegrationTest(unittest.TestCase):
 
     def _drop_schemas_adapter(self):
         schema = self.unique_schema()
-        if self.adapter_type == 'bigquery' or self.adapter_type == 'presto':
+        if self.adapter_type == 'presto':
             self._drop_schema_named(self.default_database, schema)
             if self.setup_alternate_db and self.alternative_database:
                 self._drop_schema_named(self.alternative_database, schema)
@@ -484,10 +478,10 @@ class DBTIntegrationTest(unittest.TestCase):
         self._created_schemas.add(
             self._get_schema_fqn(self.default_database, schema)
         )
-        # on postgres/redshift, this will make you sad
+        # on postgres, this will make you sad
         drop_alternative = (
             self.setup_alternate_db and
-            self.adapter_type not in {'postgres', 'redshift'} and
+            self.adapter_type not in {'postgres'} and
             self.alternative_database
         )
         if drop_alternative:
@@ -502,39 +496,47 @@ class DBTIntegrationTest(unittest.TestCase):
 
     def _drop_schemas(self):
         with self.adapter.connection_named('__test'):
-            if self.adapter_type == 'bigquery' or self.adapter_type == 'presto':
+            if self.adapter_type == 'presto':
                 self._drop_schemas_adapter()
             else:
                 self._drop_schemas_sql()
 
     @property
     def project_config(self):
-        return {}
+        return {
+            'config-version': 2,
+        }
 
     @property
     def profile_config(self):
         return {}
 
-    def run_dbt(self, args=None, expect_pass=True, strict=True, parser=True, profiles_dir=True):
-        res, success = self.run_dbt_and_check(args=args, strict=strict, parser=parser, profiles_dir=profiles_dir)
-
+    def run_dbt(self, args=None, expect_pass=True, profiles_dir=True):
+        res, success = self.run_dbt_and_check(args=args, profiles_dir=profiles_dir)
         self.assertEqual(
             success, expect_pass,
             "dbt exit state did not match expected")
 
         return res
 
-    def run_dbt_and_check(self, args=None, strict=True, parser=False, profiles_dir=True):
+    def run_dbt_and_capture(self, *args, **kwargs):
+        try:
+            stringbuf = capture_stdout_logs()
+            res = self.run_dbt(*args, **kwargs)
+            stdout = stringbuf.getvalue()
+
+        finally:
+            stop_capture_stdout_logs()
+
+        return res, stdout
+
+    def run_dbt_and_check(self, args=None, profiles_dir=True):
         log_manager.reset_handlers()
         if args is None:
             args = ["run"]
 
         final_args = []
 
-        if strict:
-            final_args.append('--strict')
-        if parser:
-            final_args.append('--test-new-parser')
         if os.getenv('DBT_TEST_SINGLE_THREADED') in ('y', 'Y', '1'):
             final_args.append('--single-threaded')
 
@@ -543,8 +545,8 @@ class DBTIntegrationTest(unittest.TestCase):
         if profiles_dir:
             final_args.extend(['--profiles-dir', self.test_root_dir])
         final_args.append('--log-cache-events')
-
-        logger.info("Invoking dbt with {}".format(final_args))
+        msg = f"Invoking dbt with {final_args}"
+        fire_event(IntegrationTestInfo(msg=msg))
         return dbt.handle_and_check(final_args)
 
     def run_sql_file(self, path, kwargs=None):
@@ -568,23 +570,9 @@ class DBTIntegrationTest(unittest.TestCase):
             kwargs = {}
         base_kwargs.update(kwargs)
 
-
         to_return = to_return.format(**base_kwargs)
 
         return to_return
-
-    def run_sql_bigquery(self, sql, fetch):
-        """Run an SQL query on a bigquery adapter. No cursors, transactions,
-        etc. to worry about"""
-
-        do_fetch = fetch != 'None'
-        _, res = self.adapter.execute(sql, fetch=do_fetch)
-
-        # convert dataframe to matrix-ish repr
-        if fetch == 'one':
-            return res[0]
-        else:
-            return list(res)
 
     def run_sql_presto(self, sql, fetch, conn):
         cursor = conn.handle.cursor()
@@ -619,7 +607,7 @@ class DBTIntegrationTest(unittest.TestCase):
                 else:
                     return
             except BaseException as e:
-                if conn.handle and not conn.handle.closed:
+                if conn.handle and not getattr(conn.handle, 'closed', True):
                     conn.handle.rollback()
                 print(sql)
                 print(e)
@@ -637,10 +625,9 @@ class DBTIntegrationTest(unittest.TestCase):
         sql = self.transform_sql(query, kwargs=kwargs)
 
         with self.get_connection(connection_name) as conn:
-            logger.debug('test connection "{}" executing: {}'.format(conn.name, sql))
-            if self.adapter_type == 'bigquery':
-                return self.run_sql_bigquery(sql, fetch)
-            elif self.adapter_type == 'presto':
+            msg = f'test connection "{conn.name}" executing: {sql}'
+            fire_event(IntegrationTestDebug(msg=msg))
+            if self.adapter_type == 'presto':
                 return self.run_sql_presto(sql, fetch, conn)
             else:
                 return self.run_sql_common(sql, fetch, conn)
@@ -707,20 +694,9 @@ class DBTIntegrationTest(unittest.TestCase):
         columns = self.run_sql(sql, fetch='all')
         return list(map(self.filter_many_columns, columns))
 
-    def get_many_table_columns_bigquery(self, tables, schema, database=None):
-        result = []
-        for table in tables:
-            relation = self._make_relation(table, schema, database)
-            columns = self.adapter.get_columns_in_relation(relation)
-            for col in columns:
-                result.append((table, col.column, col.dtype, col.char_size))
-        return result
-
     def get_many_table_columns(self, tables, schema, database=None):
         if self.adapter_type == 'snowflake':
             result = self.get_many_table_columns_snowflake(tables, schema, database)
-        elif self.adapter_type == 'bigquery':
-            result = self.get_many_table_columns_bigquery(tables, schema, database)
         else:
             result = self.get_many_table_columns_information_schema(tables, schema, database)
         result.sort(key=lambda x: '{}.{}'.format(x[0], x[1]))
@@ -748,7 +724,7 @@ class DBTIntegrationTest(unittest.TestCase):
         """
         if name is None:
             name = '__test'
-        with patch.object(common, 'get_adapter', return_value=self.adapter):
+        with patch.object(providers, 'get_adapter', return_value=self.adapter):
             with self.adapter.connection_named(name):
                 conn = self.adapter.connections.get_thread_connection()
                 yield conn
@@ -826,46 +802,11 @@ class DBTIntegrationTest(unittest.TestCase):
     def _assertTablesEqualSql(self, relation_a, relation_b, columns=None):
         if columns is None:
             columns = self.get_relation_columns(relation_a)
+        column_names = [c[0] for c in columns]
 
-        columns_csv = ', '.join([self.adapter.quote(record[0]) for record in columns])
-
-        if self.adapter_type == 'bigquery':
-            except_operator = 'EXCEPT DISTINCT'
-        else:
-            except_operator = 'EXCEPT'
-
-        sql = """
-            with diff_count as (
-                SELECT
-                    1 as id,
-                    COUNT(*) as num_missing FROM (
-                        (SELECT {columns} FROM {relation_a} {except_op}
-                         SELECT {columns} FROM {relation_b})
-                         UNION ALL
-                        (SELECT {columns} FROM {relation_b} {except_op}
-                         SELECT {columns} FROM {relation_a})
-                    ) as a
-            ), table_a as (
-                SELECT COUNT(*) as num_rows FROM {relation_a}
-            ), table_b as (
-                SELECT COUNT(*) as num_rows FROM {relation_b}
-            ), row_count_diff as (
-                select
-                    1 as id,
-                    table_a.num_rows - table_b.num_rows as difference
-                from table_a, table_b
-            )
-            select
-                row_count_diff.difference as row_count_difference,
-                diff_count.num_missing as num_mismatched
-            from row_count_diff
-            join diff_count using (id)
-            """.strip().format(
-                columns=columns_csv,
-                relation_a=str(relation_a),
-                relation_b=str(relation_b),
-                except_op=except_operator
-            )
+        sql = self.adapter.get_rows_different_sql(
+            relation_a, relation_b, column_names
+        )
 
         return sql
 
@@ -967,6 +908,8 @@ class DBTIntegrationTest(unittest.TestCase):
         first_columns = None
         for relation in specs:
             key = (relation.database, relation.schema, relation.identifier)
+            # get a good error here instead of a hard-to-diagnose KeyError
+            self.assertIn(key, column_specs, f'No columns found for {key}')
             columns = column_specs[key]
             if first_columns is None:
                 first_columns = columns
@@ -1037,7 +980,6 @@ class DBTIntegrationTest(unittest.TestCase):
                     'num_mismatched nonzero: ' + sql
                 )
 
-
     def _assertTableRowCountsEqual(self, relation_a, relation_b):
         cmp_query = """
             with table_a as (
@@ -1055,7 +997,6 @@ class DBTIntegrationTest(unittest.TestCase):
 
         """.format(str(relation_a), str(relation_b))
 
-
         res = self.run_sql(cmp_query, fetch='one')
 
         self.assertEqual(int(res[0]), 0, "Row count of table {} doesn't match row count of table {}. ({} rows different)".format(
@@ -1065,16 +1006,16 @@ class DBTIntegrationTest(unittest.TestCase):
             )
         )
 
-    def assertTableDoesNotExist(self, table, schema=None):
-        columns = self.get_table_columns(table, schema)
+    def assertTableDoesNotExist(self, table, schema=None, database=None):
+        columns = self.get_table_columns(table, schema, database)
 
         self.assertEqual(
             len(columns),
             0
         )
 
-    def assertTableDoesExist(self, table, schema=None):
-        columns = self.get_table_columns(table, schema)
+    def assertTableDoesExist(self, table, schema=None, database=None):
+        columns = self.get_table_columns(table, schema, database)
 
         self.assertGreater(
             len(columns),
@@ -1132,6 +1073,16 @@ class DBTIntegrationTest(unittest.TestCase):
                 end.strftime(datefmt))
         )
 
+    def copy_file(self, src, dest) -> None:
+        # move files in the temp testing dir created
+        shutil.copyfile(
+            os.path.join(self.test_root_dir, src),
+            os.path.join(self.test_root_dir, dest),
+        )
+
+    def rm_file(self, src) -> None:
+        os.remove(os.path.join(self.test_root_dir, src))
+
 
 def use_profile(profile_name):
     """A decorator to declare a test method as using a particular profile.
@@ -1188,3 +1139,14 @@ class AnyStringWith:
 
     def __repr__(self):
         return 'AnyStringWith<{!r}>'.format(self.contains)
+
+
+def get_manifest():
+    path = './target/partial_parse.msgpack'
+    if os.path.exists(path):
+        with open(path, 'rb') as fp:
+            manifest_mp = fp.read()
+        manifest: Manifest = Manifest.from_msgpack(manifest_mp)
+        return manifest
+    else:
+        return None

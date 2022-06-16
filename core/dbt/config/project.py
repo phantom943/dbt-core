@@ -1,46 +1,57 @@
 from copy import deepcopy
+from dataclasses import dataclass, field
+from itertools import chain
+from typing import (
+    List,
+    Dict,
+    Any,
+    Optional,
+    TypeVar,
+    Union,
+    Mapping,
+)
+from typing_extensions import Protocol, runtime_checkable
+
 import hashlib
 import os
 
+from dbt import deprecations
 from dbt.clients.system import resolve_path_from_base
 from dbt.clients.system import path_exists
 from dbt.clients.system import load_file_contents
 from dbt.clients.yaml_helper import load_yaml_text
+from dbt.contracts.connection import QueryComment
 from dbt.exceptions import DbtProjectError
-from dbt.exceptions import RecursionException
 from dbt.exceptions import SemverException
 from dbt.exceptions import validator_error_message
-from dbt.exceptions import warn_or_error
+from dbt.exceptions import RuntimeException
+from dbt.graph import SelectionSpec
 from dbt.helper_types import NoValue
 from dbt.semver import VersionSpecifier
 from dbt.semver import versions_compatible
 from dbt.version import get_installed_version
-from dbt.ui import printer
-from dbt.utils import deep_map
-from dbt.utils import parse_cli_vars
-from dbt.source_config import SourceConfig
-
-from dbt.contracts.graph.manifest import ManifestMetadata
-from dbt.contracts.project import Project as ProjectContract
+from dbt.utils import MultiDict
+from dbt.node_types import NodeType
+from dbt.config.selectors import SelectorDict
+from dbt.contracts.project import (
+    Project as ProjectContract,
+    SemverString,
+)
 from dbt.contracts.project import PackageConfig
-
-from hologram import ValidationError
-
-from .renderer import ConfigRenderer
-
-
-UNUSED_RESOURCE_CONFIGURATION_PATH_MESSAGE = """\
-WARNING: Configuration paths exist in your dbt_project.yml file which do not \
-apply to any resources.
-There are {} unused configuration paths:\n{}
-"""
+from dbt.dataclass_schema import ValidationError
+from .renderer import DbtProjectYamlRenderer
+from .selectors import (
+    selector_config_from_data,
+    selector_data_from_root,
+    SelectorConfig,
+)
 
 
 INVALID_VERSION_ERROR = """\
 This version of dbt is not supported with the '{package}' package.
   Installed version of dbt: {installed}
   Required version of dbt for '{package}': {version_spec}
-Check the requirements for the '{package}' package, or run dbt again with \
+Check for a different version of the '{package}' package, or run dbt again with \
 --no-version-check
 """
 
@@ -49,28 +60,27 @@ IMPOSSIBLE_VERSION_ERROR = """\
 The package version requirement can never be satisfied for the '{package}
 package.
   Required versions of dbt for '{package}': {version_spec}
-Check the requirements for the '{package}' package, or run dbt again with \
+Check for a different version of the '{package}' package, or run dbt again with \
 --no-version-check
 """
 
+MALFORMED_PACKAGE_ERROR = """\
+The packages.yml file in this project is malformed. Please double check
+the contents of this file and fix any errors before retrying.
 
-def _list_if_none(value):
-    if value is None:
-        value = []
-    return value
+You can find more information on the syntax for this file here:
+https://docs.getdbt.com/docs/package-management
+
+Validator Error:
+{error}
+"""
 
 
-def _dict_if_none(value):
-    if value is None:
-        value = {}
-    return value
-
-
-def _list_if_none_or_string(value):
-    value = _list_if_none(value)
-    if isinstance(value, str):
-        return [value]
-    return value
+@runtime_checkable
+class IsFQNResource(Protocol):
+    fqn: List[str]
+    resource_type: NodeType
+    package_name: str
 
 
 def _load_yaml(path):
@@ -78,36 +88,8 @@ def _load_yaml(path):
     return load_yaml_text(contents)
 
 
-def _get_config_paths(config, path=(), paths=None):
-    if paths is None:
-        paths = set()
-
-    for key, value in config.items():
-        if isinstance(value, dict):
-            if key in SourceConfig.ConfigKeys:
-                if path not in paths:
-                    paths.add(path)
-            else:
-                _get_config_paths(value, path + (key,), paths)
-        else:
-            if path not in paths:
-                paths.add(path)
-
-    return frozenset(paths)
-
-
-def _is_config_used(path, fqns):
-    if fqns:
-        for fqn in fqns:
-            if len(path) <= len(fqn) and fqn[:len(path)] == path:
-                return True
-    return False
-
-
 def package_data_from_root(project_root):
-    package_filepath = resolve_path_from_base(
-        'packages.yml', project_root
-    )
+    package_filepath = resolve_path_from_base("packages.yml", project_root)
 
     if path_exists(package_filepath):
         packages_dict = _load_yaml(package_filepath)
@@ -116,20 +98,19 @@ def package_data_from_root(project_root):
     return packages_dict
 
 
-def package_config_from_data(packages_data):
-    if packages_data is None:
-        packages_data = {'packages': []}
+def package_config_from_data(packages_data: Dict[str, Any]):
+    if not packages_data:
+        packages_data = {"packages": []}
 
     try:
+        PackageConfig.validate(packages_data)
         packages = PackageConfig.from_dict(packages_data)
     except ValidationError as e:
-        raise DbtProjectError(
-            'Invalid package config: {}'.format(validator_error_message(e))
-        ) from e
+        raise DbtProjectError(MALFORMED_PACKAGE_ERROR.format(error=str(e.message))) from e
     return packages
 
 
-def _parse_versions(versions):
+def _parse_versions(versions: Union[List[str], str]) -> List[VersionSpecifier]:
     """Parse multiple versions as read from disk. The versions value may be any
     one of:
         - a single version string ('>0.12.1')
@@ -140,177 +121,458 @@ def _parse_versions(versions):
     Regardless, this will return a list of VersionSpecifiers
     """
     if isinstance(versions, str):
-        versions = versions.split(',')
+        versions = versions.split(",")
     return [VersionSpecifier.from_version_string(v) for v in versions]
 
 
-class Project:
-    def __init__(self, project_name, version, project_root, profile_name,
-                 source_paths, macro_paths, data_paths, test_paths,
-                 analysis_paths, docs_paths, target_path, snapshot_paths,
-                 clean_targets, log_path, modules_path, quoting, models,
-                 on_run_start, on_run_end, seeds, snapshots, dbt_version,
-                 packages, query_comment):
-        self.project_name = project_name
-        self.version = version
-        self.project_root = project_root
-        self.profile_name = profile_name
-        self.source_paths = source_paths
-        self.macro_paths = macro_paths
-        self.data_paths = data_paths
-        self.test_paths = test_paths
-        self.analysis_paths = analysis_paths
-        self.docs_paths = docs_paths
-        self.target_path = target_path
-        self.snapshot_paths = snapshot_paths
-        self.clean_targets = clean_targets
-        self.log_path = log_path
-        self.modules_path = modules_path
-        self.quoting = quoting
-        self.models = models
-        self.on_run_start = on_run_start
-        self.on_run_end = on_run_end
-        self.seeds = seeds
-        self.snapshots = snapshots
-        self.dbt_version = dbt_version
-        self.packages = packages
-        self.query_comment = query_comment
+def _all_source_paths(
+    model_paths: List[str],
+    seed_paths: List[str],
+    snapshot_paths: List[str],
+    analysis_paths: List[str],
+    macro_paths: List[str],
+) -> List[str]:
+    # We need to turn a list of lists into just a list, then convert to a set to
+    # get only unique elements, then back to a list
+    return list(
+        set(list(chain(model_paths, seed_paths, snapshot_paths, analysis_paths, macro_paths)))
+    )
 
-    @staticmethod
-    def _preprocess(project_dict):
-        """Pre-process certain special keys to convert them from None values
-        into empty containers, and to turn strings into arrays of strings.
-        """
-        handlers = {
-            ('on-run-start',): _list_if_none_or_string,
-            ('on-run-end',): _list_if_none_or_string,
-        }
 
-        for k in ('models', 'seeds', 'snapshots'):
-            handlers[(k,)] = _dict_if_none
-            handlers[(k, 'vars')] = _dict_if_none
-            handlers[(k, 'pre-hook')] = _list_if_none_or_string
-            handlers[(k, 'post-hook')] = _list_if_none_or_string
-        handlers[('seeds', 'column_types')] = _dict_if_none
+T = TypeVar("T")
 
-        def converter(value, keypath):
-            if keypath in handlers:
-                handler = handlers[keypath]
-                return handler(value)
-            else:
-                return value
 
-        return deep_map(converter, project_dict)
+def value_or(value: Optional[T], default: T) -> T:
+    if value is None:
+        return default
+    else:
+        return value
 
-    @classmethod
-    def from_project_config(cls, project_dict, packages_dict=None):
-        """Create a project from its project and package configuration, as read
-        by yaml.safe_load().
 
-        :param project_dict dict: The dictionary as read from disk
-        :param packages_dict Optional[dict]: If it exists, the packages file as
-            read from disk.
-        :raises DbtProjectError: If the project is missing or invalid, or if
-            the packages file exists and is invalid.
-        :returns Project: The project, with defaults populated.
-        """
-        try:
-            project_dict = cls._preprocess(project_dict)
-        except RecursionException:
+def _raw_project_from(project_root: str) -> Dict[str, Any]:
+
+    project_root = os.path.normpath(project_root)
+    project_yaml_filepath = os.path.join(project_root, "dbt_project.yml")
+
+    # get the project.yml contents
+    if not path_exists(project_yaml_filepath):
+        raise DbtProjectError(
+            "no dbt_project.yml found at expected path {}".format(project_yaml_filepath)
+        )
+
+    project_dict = _load_yaml(project_yaml_filepath)
+
+    if not isinstance(project_dict, dict):
+        raise DbtProjectError("dbt_project.yml does not parse to a dictionary")
+
+    return project_dict
+
+
+def _query_comment_from_cfg(
+    cfg_query_comment: Union[QueryComment, NoValue, str, None]
+) -> QueryComment:
+    if not cfg_query_comment:
+        return QueryComment(comment="")
+
+    if isinstance(cfg_query_comment, str):
+        return QueryComment(comment=cfg_query_comment)
+
+    if isinstance(cfg_query_comment, NoValue):
+        return QueryComment()
+
+    return cfg_query_comment
+
+
+def validate_version(dbt_version: List[VersionSpecifier], project_name: str):
+    """Ensure this package works with the installed version of dbt."""
+    installed = get_installed_version()
+    if not versions_compatible(*dbt_version):
+        msg = IMPOSSIBLE_VERSION_ERROR.format(
+            package=project_name, version_spec=[x.to_version_string() for x in dbt_version]
+        )
+        raise DbtProjectError(msg)
+
+    if not versions_compatible(installed, *dbt_version):
+        msg = INVALID_VERSION_ERROR.format(
+            package=project_name,
+            installed=installed.to_version_string(),
+            version_spec=[x.to_version_string() for x in dbt_version],
+        )
+        raise DbtProjectError(msg)
+
+
+def _get_required_version(
+    project_dict: Dict[str, Any],
+    verify_version: bool,
+) -> List[VersionSpecifier]:
+    dbt_raw_version: Union[List[str], str] = ">=0.0.0"
+    required = project_dict.get("require-dbt-version")
+    if required is not None:
+        dbt_raw_version = required
+
+    try:
+        dbt_version = _parse_versions(dbt_raw_version)
+    except SemverException as e:
+        raise DbtProjectError(str(e)) from e
+
+    if verify_version:
+        # no name is also an error that we want to raise
+        if "name" not in project_dict:
             raise DbtProjectError(
-                'Cycle detected: Project input has a reference to itself',
-                project=project_dict
+                'Required "name" field not present in project',
             )
-        # just for validation.
+        validate_version(dbt_version, project_dict["name"])
+
+    return dbt_version
+
+
+@dataclass
+class RenderComponents:
+    project_dict: Dict[str, Any] = field(metadata=dict(description="The project dictionary"))
+    packages_dict: Dict[str, Any] = field(metadata=dict(description="The packages dictionary"))
+    selectors_dict: Dict[str, Any] = field(metadata=dict(description="The selectors dictionary"))
+
+
+@dataclass
+class PartialProject(RenderComponents):
+    profile_name: Optional[str] = field(
+        metadata=dict(description="The unrendered profile name in the project, if set")
+    )
+    project_name: Optional[str] = field(
+        metadata=dict(
+            description=(
+                "The name of the project. This should always be set and will not " "be rendered"
+            )
+        )
+    )
+    project_root: str = field(
+        metadata=dict(description="The root directory of the project"),
+    )
+    verify_version: bool = field(
+        metadata=dict(description=("If True, verify the dbt version matches the required version"))
+    )
+
+    def render_profile_name(self, renderer) -> Optional[str]:
+        if self.profile_name is None:
+            return None
+        return renderer.render_value(self.profile_name)
+
+    def get_rendered(
+        self,
+        renderer: DbtProjectYamlRenderer,
+    ) -> RenderComponents:
+
+        rendered_project = renderer.render_project(self.project_dict, self.project_root)
+        rendered_packages = renderer.render_packages(self.packages_dict)
+        rendered_selectors = renderer.render_selectors(self.selectors_dict)
+
+        return RenderComponents(
+            project_dict=rendered_project,
+            packages_dict=rendered_packages,
+            selectors_dict=rendered_selectors,
+        )
+
+    # Called by 'collect_parts' in RuntimeConfig
+    def render(self, renderer: DbtProjectYamlRenderer) -> "Project":
         try:
-            ProjectContract.from_dict(project_dict)
+            rendered = self.get_rendered(renderer)
+            return self.create_project(rendered)
+        except DbtProjectError as exc:
+            if exc.path is None:
+                exc.path = os.path.join(self.project_root, "dbt_project.yml")
+            raise
+
+    def check_config_path(self, project_dict, deprecated_path, exp_path):
+        if deprecated_path in project_dict:
+            if exp_path in project_dict:
+                msg = (
+                    "{deprecated_path} and {exp_path} cannot both be defined. The "
+                    "`{deprecated_path}` config has been deprecated in favor of `{exp_path}`. "
+                    "Please update your `dbt_project.yml` configuration to reflect this "
+                    "change."
+                )
+                raise DbtProjectError(
+                    msg.format(deprecated_path=deprecated_path, exp_path=exp_path)
+                )
+            deprecations.warn(
+                f"project-config-{deprecated_path}",
+                deprecated_path=deprecated_path,
+                exp_path=exp_path,
+            )
+
+    def create_project(self, rendered: RenderComponents) -> "Project":
+        unrendered = RenderComponents(
+            project_dict=self.project_dict,
+            packages_dict=self.packages_dict,
+            selectors_dict=self.selectors_dict,
+        )
+        dbt_version = _get_required_version(
+            rendered.project_dict,
+            verify_version=self.verify_version,
+        )
+
+        self.check_config_path(rendered.project_dict, "source-paths", "model-paths")
+        self.check_config_path(rendered.project_dict, "data-paths", "seed-paths")
+
+        try:
+            ProjectContract.validate(rendered.project_dict)
+            cfg = ProjectContract.from_dict(rendered.project_dict)
         except ValidationError as e:
             raise DbtProjectError(validator_error_message(e)) from e
-
         # name/version are required in the Project definition, so we can assume
         # they are present
-        name = project_dict['name']
-        version = project_dict['version']
+        name = cfg.name
+        version = cfg.version
         # this is added at project_dict parse time and should always be here
         # once we see it.
-        project_root = project_dict['project-root']
+        if cfg.project_root is None:
+            raise DbtProjectError("cfg must have a project root!")
+        else:
+            project_root = cfg.project_root
         # this is only optional in the sense that if it's not present, it needs
         # to have been a cli argument.
-        profile_name = project_dict.get('profile')
-        # these are optional
-        source_paths = project_dict.get('source-paths', ['models'])
-        macro_paths = project_dict.get('macro-paths', ['macros'])
-        data_paths = project_dict.get('data-paths', ['data'])
-        test_paths = project_dict.get('test-paths', ['test'])
-        analysis_paths = project_dict.get('analysis-paths', [])
-        docs_paths = project_dict.get('docs-paths', source_paths[:])
-        target_path = project_dict.get('target-path', 'target')
-        snapshot_paths = project_dict.get('snapshot-paths', ['snapshots'])
-        # should this also include the modules path by default?
-        clean_targets = project_dict.get('clean-targets', [target_path])
-        log_path = project_dict.get('log-path', 'logs')
-        modules_path = project_dict.get('modules-path', 'dbt_modules')
+        profile_name = cfg.profile
+        # these are all the defaults
+
+        # `source_paths` is deprecated but still allowed. Copy it into
+        # `model_paths` to simlify logic throughout the rest of the system.
+        model_paths: List[str] = value_or(
+            cfg.model_paths if "model-paths" in rendered.project_dict else cfg.source_paths,
+            ["models"],
+        )
+        macro_paths: List[str] = value_or(cfg.macro_paths, ["macros"])
+        # `data_paths` is deprecated but still allowed. Copy it into
+        # `seed_paths` to simlify logic throughout the rest of the system.
+        seed_paths: List[str] = value_or(
+            cfg.seed_paths if "seed-paths" in rendered.project_dict else cfg.data_paths, ["seeds"]
+        )
+        test_paths: List[str] = value_or(cfg.test_paths, ["tests"])
+        analysis_paths: List[str] = value_or(cfg.analysis_paths, ["analyses"])
+        snapshot_paths: List[str] = value_or(cfg.snapshot_paths, ["snapshots"])
+
+        all_source_paths: List[str] = _all_source_paths(
+            model_paths, seed_paths, snapshot_paths, analysis_paths, macro_paths
+        )
+
+        docs_paths: List[str] = value_or(cfg.docs_paths, all_source_paths)
+        asset_paths: List[str] = value_or(cfg.asset_paths, [])
+        target_path: str = value_or(cfg.target_path, "target")
+        clean_targets: List[str] = value_or(cfg.clean_targets, [target_path])
+        log_path: str = value_or(cfg.log_path, "logs")
+        packages_install_path: str = value_or(cfg.packages_install_path, "dbt_packages")
         # in the default case we'll populate this once we know the adapter type
-        quoting = project_dict.get('quoting', {})
+        # It would be nice to just pass along a Quoting here, but that would
+        # break many things
+        quoting: Dict[str, Any] = {}
+        if cfg.quoting is not None:
+            quoting = cfg.quoting.to_dict(omit_none=True)
 
-        models = project_dict.get('models', {})
-        on_run_start = project_dict.get('on-run-start', [])
-        on_run_end = project_dict.get('on-run-end', [])
-        seeds = project_dict.get('seeds', {})
-        snapshots = project_dict.get('snapshots', {})
-        dbt_raw_version = project_dict.get('require-dbt-version', '>=0.0.0')
-        query_comment = project_dict.get('query-comment', NoValue())
+        dispatch: List[Dict[str, Any]]
+        models: Dict[str, Any]
+        seeds: Dict[str, Any]
+        snapshots: Dict[str, Any]
+        sources: Dict[str, Any]
+        tests: Dict[str, Any]
+        vars_value: VarProvider
 
-        try:
-            dbt_version = _parse_versions(dbt_raw_version)
-        except SemverException as e:
-            raise DbtProjectError(str(e)) from e
+        dispatch = cfg.dispatch
+        models = cfg.models
+        seeds = cfg.seeds
+        snapshots = cfg.snapshots
+        sources = cfg.sources
+        tests = cfg.tests
+        if cfg.vars is None:
+            vars_dict: Dict[str, Any] = {}
+        else:
+            vars_dict = cfg.vars
 
-        try:
-            packages = package_config_from_data(packages_dict)
-        except ValidationError as e:
-            raise DbtProjectError(validator_error_message(e)) from e
+        vars_value = VarProvider(vars_dict)
+        # There will never be any project_env_vars when it's first created
+        project_env_vars: Dict[str, Any] = {}
+        on_run_start: List[str] = value_or(cfg.on_run_start, [])
+        on_run_end: List[str] = value_or(cfg.on_run_end, [])
 
-        project = cls(
+        query_comment = _query_comment_from_cfg(cfg.query_comment)
+
+        packages = package_config_from_data(rendered.packages_dict)
+        selectors = selector_config_from_data(rendered.selectors_dict)
+        manifest_selectors: Dict[str, Any] = {}
+        if rendered.selectors_dict and rendered.selectors_dict["selectors"]:
+            # this is a dict with a single key 'selectors' pointing to a list
+            # of dicts.
+            manifest_selectors = SelectorDict.parse_from_selectors_list(
+                rendered.selectors_dict["selectors"]
+            )
+        project = Project(
             project_name=name,
             version=version,
             project_root=project_root,
             profile_name=profile_name,
-            source_paths=source_paths,
+            model_paths=model_paths,
             macro_paths=macro_paths,
-            data_paths=data_paths,
+            seed_paths=seed_paths,
             test_paths=test_paths,
             analysis_paths=analysis_paths,
             docs_paths=docs_paths,
+            asset_paths=asset_paths,
             target_path=target_path,
             snapshot_paths=snapshot_paths,
             clean_targets=clean_targets,
             log_path=log_path,
-            modules_path=modules_path,
+            packages_install_path=packages_install_path,
             quoting=quoting,
             models=models,
             on_run_start=on_run_start,
             on_run_end=on_run_end,
+            dispatch=dispatch,
             seeds=seeds,
             snapshots=snapshots,
             dbt_version=dbt_version,
             packages=packages,
+            manifest_selectors=manifest_selectors,
+            selectors=selectors,
             query_comment=query_comment,
+            sources=sources,
+            tests=tests,
+            vars=vars_value,
+            config_version=cfg.config_version,
+            unrendered=unrendered,
+            project_env_vars=project_env_vars,
         )
         # sanity check - this means an internal issue
         project.validate()
         return project
+
+    @classmethod
+    def from_dicts(
+        cls,
+        project_root: str,
+        project_dict: Dict[str, Any],
+        packages_dict: Dict[str, Any],
+        selectors_dict: Dict[str, Any],
+        *,
+        verify_version: bool = False,
+    ):
+        """Construct a partial project from its constituent dicts."""
+        project_name = project_dict.get("name")
+        profile_name = project_dict.get("profile")
+
+        return cls(
+            profile_name=profile_name,
+            project_name=project_name,
+            project_root=project_root,
+            project_dict=project_dict,
+            packages_dict=packages_dict,
+            selectors_dict=selectors_dict,
+            verify_version=verify_version,
+        )
+
+    @classmethod
+    def from_project_root(
+        cls, project_root: str, *, verify_version: bool = False
+    ) -> "PartialProject":
+        project_root = os.path.normpath(project_root)
+        project_dict = _raw_project_from(project_root)
+        config_version = project_dict.get("config-version", 1)
+        if config_version != 2:
+            raise DbtProjectError(
+                f"Invalid config version: {config_version}, expected 2",
+                path=os.path.join(project_root, "dbt_project.yml"),
+            )
+
+        packages_dict = package_data_from_root(project_root)
+        selectors_dict = selector_data_from_root(project_root)
+        return cls.from_dicts(
+            project_root=project_root,
+            project_dict=project_dict,
+            selectors_dict=selectors_dict,
+            packages_dict=packages_dict,
+            verify_version=verify_version,
+        )
+
+
+class VarProvider:
+    """Var providers are tied to a particular Project."""
+
+    def __init__(self, vars: Dict[str, Dict[str, Any]]) -> None:
+        self.vars = vars
+
+    def vars_for(self, node: IsFQNResource, adapter_type: str) -> Mapping[str, Any]:
+        # in v2, vars are only either project or globally scoped
+        merged = MultiDict([self.vars])
+        merged.add(self.vars.get(node.package_name, {}))
+        return merged
+
+    def to_dict(self):
+        return self.vars
+
+
+# The Project class is included in RuntimeConfig, so any attribute
+# additions must also be set where the RuntimeConfig class is created
+@dataclass
+class Project:
+    project_name: str
+    version: Union[SemverString, float]
+    project_root: str
+    profile_name: Optional[str]
+    model_paths: List[str]
+    macro_paths: List[str]
+    seed_paths: List[str]
+    test_paths: List[str]
+    analysis_paths: List[str]
+    docs_paths: List[str]
+    asset_paths: List[str]
+    target_path: str
+    snapshot_paths: List[str]
+    clean_targets: List[str]
+    log_path: str
+    packages_install_path: str
+    quoting: Dict[str, Any]
+    models: Dict[str, Any]
+    on_run_start: List[str]
+    on_run_end: List[str]
+    dispatch: List[Dict[str, Any]]
+    seeds: Dict[str, Any]
+    snapshots: Dict[str, Any]
+    sources: Dict[str, Any]
+    tests: Dict[str, Any]
+    vars: VarProvider
+    dbt_version: List[VersionSpecifier]
+    packages: Dict[str, Any]
+    manifest_selectors: Dict[str, Any]
+    selectors: SelectorConfig
+    query_comment: QueryComment
+    config_version: int
+    unrendered: RenderComponents
+    project_env_vars: Dict[str, Any]
+
+    @property
+    def all_source_paths(self) -> List[str]:
+        return _all_source_paths(
+            self.model_paths,
+            self.seed_paths,
+            self.snapshot_paths,
+            self.analysis_paths,
+            self.macro_paths,
+        )
+
+    @property
+    def generic_test_paths(self):
+        generic_test_paths = []
+        for test_path in self.test_paths:
+            generic_test_paths.append(os.path.join(test_path, "generic"))
+        return generic_test_paths
 
     def __str__(self):
         cfg = self.to_project_config(with_packages=True)
         return str(cfg)
 
     def __eq__(self, other):
-        if not (isinstance(other, self.__class__) and
-                isinstance(self, other.__class__)):
+        if not (isinstance(other, self.__class__) and isinstance(self, other.__class__)):
             return False
-        return self.to_project_config(with_packages=True) == \
-            other.to_project_config(with_packages=True)
+        return self.to_project_config(with_packages=True) == other.to_project_config(
+            with_packages=True
+        )
 
     def to_project_config(self, with_packages=False):
         """Return a dict representation of the config that could be written to
@@ -320,147 +582,92 @@ class Project:
             file in the root.
         :returns dict: The serialized profile.
         """
-        result = deepcopy({
-            'name': self.project_name,
-            'version': self.version,
-            'project-root': self.project_root,
-            'profile': self.profile_name,
-            'source-paths': self.source_paths,
-            'macro-paths': self.macro_paths,
-            'data-paths': self.data_paths,
-            'test-paths': self.test_paths,
-            'analysis-paths': self.analysis_paths,
-            'docs-paths': self.docs_paths,
-            'target-path': self.target_path,
-            'snapshot-paths': self.snapshot_paths,
-            'clean-targets': self.clean_targets,
-            'log-path': self.log_path,
-            'quoting': self.quoting,
-            'models': self.models,
-            'on-run-start': self.on_run_start,
-            'on-run-end': self.on_run_end,
-            'seeds': self.seeds,
-            'snapshots': self.snapshots,
-            'require-dbt-version': [
-                v.to_version_string() for v in self.dbt_version
-            ],
-        })
+        result = deepcopy(
+            {
+                "name": self.project_name,
+                "version": self.version,
+                "project-root": self.project_root,
+                "profile": self.profile_name,
+                "model-paths": self.model_paths,
+                "macro-paths": self.macro_paths,
+                "seed-paths": self.seed_paths,
+                "test-paths": self.test_paths,
+                "analysis-paths": self.analysis_paths,
+                "docs-paths": self.docs_paths,
+                "asset-paths": self.asset_paths,
+                "target-path": self.target_path,
+                "snapshot-paths": self.snapshot_paths,
+                "clean-targets": self.clean_targets,
+                "log-path": self.log_path,
+                "quoting": self.quoting,
+                "models": self.models,
+                "on-run-start": self.on_run_start,
+                "on-run-end": self.on_run_end,
+                "dispatch": self.dispatch,
+                "seeds": self.seeds,
+                "snapshots": self.snapshots,
+                "sources": self.sources,
+                "tests": self.tests,
+                "vars": self.vars.to_dict(),
+                "require-dbt-version": [v.to_version_string() for v in self.dbt_version],
+                "config-version": self.config_version,
+            }
+        )
+        if self.query_comment:
+            result["query-comment"] = self.query_comment.to_dict(omit_none=True)
+
         if with_packages:
-            result.update(self.packages.to_dict())
-        if self.query_comment != NoValue():
-            result['query-comment'] = self.query_comment
+            result.update(self.packages.to_dict(omit_none=True))
 
         return result
 
     def validate(self):
         try:
-            ProjectContract.from_dict(self.to_project_config())
+            ProjectContract.validate(self.to_project_config())
         except ValidationError as e:
             raise DbtProjectError(validator_error_message(e)) from e
 
     @classmethod
-    def from_project_root(cls, project_root, cli_vars):
-        """Create a project from a root directory. Reads in dbt_project.yml and
-        packages.yml, if it exists.
-
-        :param project_root str: The path to the project root to load.
-        :raises DbtProjectError: If the project is missing or invalid, or if
-            the packages file exists and is invalid.
-        :returns Project: The project, with defaults populated.
-        """
-        project_root = os.path.normpath(project_root)
-        project_yaml_filepath = os.path.join(project_root, 'dbt_project.yml')
-
-        # get the project.yml contents
-        if not path_exists(project_yaml_filepath):
-            raise DbtProjectError(
-                'no dbt_project.yml found at expected path {}'
-                .format(project_yaml_filepath)
-            )
-
-        if isinstance(cli_vars, str):
-            cli_vars = parse_cli_vars(cli_vars)
-        renderer = ConfigRenderer(cli_vars)
-
-        project_dict = _load_yaml(project_yaml_filepath)
-        rendered_project = renderer.render_project(project_dict)
-        rendered_project['project-root'] = project_root
-        packages_dict = package_data_from_root(project_root)
-        return cls.from_project_config(rendered_project, packages_dict)
+    def partial_load(cls, project_root: str, *, verify_version: bool = False) -> PartialProject:
+        return PartialProject.from_project_root(
+            project_root,
+            verify_version=verify_version,
+        )
 
     @classmethod
-    def from_current_directory(cls, cli_vars):
-        return cls.from_project_root(os.getcwd(), cli_vars)
-
-    @classmethod
-    def from_args(cls, args):
-        return cls.from_current_directory(getattr(args, 'vars', '{}'))
+    def from_project_root(
+        cls,
+        project_root: str,
+        renderer: DbtProjectYamlRenderer,
+        *,
+        verify_version: bool = False,
+    ) -> "Project":
+        partial = cls.partial_load(project_root, verify_version=verify_version)
+        return partial.render(renderer)
 
     def hashed_name(self):
-        return hashlib.md5(self.project_name.encode('utf-8')).hexdigest()
+        return hashlib.md5(self.project_name.encode("utf-8")).hexdigest()
 
-    def get_resource_config_paths(self):
-        """Return a dictionary with 'seeds' and 'models' keys whose values are
-        lists of lists of strings, where each inner list of strings represents
-        a configured path in the resource.
-        """
-        return {
-            'models': _get_config_paths(self.models),
-            'seeds': _get_config_paths(self.seeds),
-            'snapshots': _get_config_paths(self.snapshots),
-        }
-
-    def get_unused_resource_config_paths(self, resource_fqns, disabled):
-        """Return a list of lists of strings, where each inner list of strings
-        represents a type + FQN path of a resource configuration that is not
-        used.
-        """
-        disabled_fqns = frozenset(tuple(fqn) for fqn in disabled)
-        resource_config_paths = self.get_resource_config_paths()
-        unused_resource_config_paths = []
-        for resource_type, config_paths in resource_config_paths.items():
-            used_fqns = resource_fqns.get(resource_type, frozenset())
-            fqns = used_fqns | disabled_fqns
-
-            for config_path in config_paths:
-                if not _is_config_used(config_path, fqns):
-                    unused_resource_config_paths.append(
-                        (resource_type,) + config_path
-                    )
-        return unused_resource_config_paths
-
-    def warn_for_unused_resource_config_paths(self, resource_fqns, disabled):
-        unused = self.get_unused_resource_config_paths(resource_fqns, disabled)
-        if len(unused) == 0:
-            return
-
-        msg = UNUSED_RESOURCE_CONFIGURATION_PATH_MESSAGE.format(
-            len(unused),
-            '\n'.join('- {}'.format('.'.join(u)) for u in unused)
-        )
-        warn_or_error(msg, log_fmt=printer.yellow('{}'))
-
-    def validate_version(self):
-        """Ensure this package works with the installed version of dbt."""
-        installed = get_installed_version()
-        if not versions_compatible(*self.dbt_version):
-            msg = IMPOSSIBLE_VERSION_ERROR.format(
-                package=self.project_name,
-                version_spec=[
-                    x.to_version_string() for x in self.dbt_version
-                ]
+    def get_selector(self, name: str) -> Union[SelectionSpec, bool]:
+        if name not in self.selectors:
+            raise RuntimeException(
+                f"Could not find selector named {name}, expected one of " f"{list(self.selectors)}"
             )
-            raise DbtProjectError(msg)
+        return self.selectors[name]["definition"]
 
-        if not versions_compatible(installed, *self.dbt_version):
-            msg = INVALID_VERSION_ERROR.format(
-                package=self.project_name,
-                installed=installed.to_version_string(),
-                version_spec=[
-                    x.to_version_string() for x in self.dbt_version
-                ]
-            )
-            raise DbtProjectError(msg)
+    def get_default_selector_name(self) -> Union[str, None]:
+        """This function fetch the default selector to use on `dbt run` (if any)
+        :return: either a selector if default is set or None
+        :rtype: Union[SelectionSpec, None]
+        """
+        for selector_name, selector in self.selectors.items():
+            if selector["default"] is True:
+                return selector_name
 
-    def get_metadata(self) -> ManifestMetadata:
-        return ManifestMetadata(self.hashed_name())
+        return None
+
+    def get_macro_search_order(self, macro_namespace: str):
+        for dispatch_entry in self.dispatch:
+            if dispatch_entry["macro_namespace"] == macro_namespace:
+                return dispatch_entry["search_order"]
+        return None

@@ -1,5 +1,0 @@
-
-name: dbt_snowflake
-version: 1.0
-
-macro-paths: ["macros"]

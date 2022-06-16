@@ -1,6 +1,6 @@
 import abc
 from functools import wraps
-from typing import Callable, Optional, Any, FrozenSet, Dict
+from typing import Callable, Optional, Any, FrozenSet, Dict, Set
 
 from dbt.deprecations import warn, renamed_method
 
@@ -30,9 +30,11 @@ class _Available:
             x.update(big_expensive_db_query())
             return x
         """
+
         def inner(func):
             func._parse_replacement_ = parse_replacement
             return self(func)
+
         return inner
 
     def deprecated(
@@ -57,13 +59,14 @@ class _Available:
         The optional parse_replacement, if provided, will provide a parse-time
         replacement for the actual method (see `available.parse`).
         """
+
         def wrapper(func):
             func_name = func.__name__
             renamed_method(func_name, supported_name)
 
             @wraps(func)
             def inner(*args, **kwargs):
-                warn('adapter:{}'.format(func_name))
+                warn("adapter:{}".format(func_name))
                 return func(*args, **kwargs)
 
             if parse_replacement:
@@ -71,6 +74,7 @@ class _Available:
             else:
                 available_function = self
             return available_function(inner)
+
         return wrapper
 
     def parse_none(self, func: Callable) -> Callable:
@@ -86,31 +90,39 @@ available = _Available()
 
 
 class AdapterMeta(abc.ABCMeta):
+    _available_: FrozenSet[str]
+    _parse_replacements_: Dict[str, Callable]
+
     def __new__(mcls, name, bases, namespace, **kwargs):
-        cls = super().__new__(mcls, name, bases, namespace, **kwargs)
+        # mypy does not like the `**kwargs`. But `ABCMeta` itself takes
+        # `**kwargs` in its argspec here (and passes them to `type.__new__`.
+        # I'm not sure there is any benefit to it after poking around a bit,
+        # but having it doesn't hurt on the python side (and omitting it could
+        # hurt for obscure metaclass reasons, for all I know)
+        cls = abc.ABCMeta.__new__(mcls, name, bases, namespace, **kwargs)  # type: ignore
 
         # this is very much inspired by ABCMeta's own implementation
 
         # dict mapping the method name to whether the model name should be
         # injected into the arguments. All methods in here are exposed to the
         # context.
-        available = set()
-        replacements = {}
+        available: Set[str] = set()
+        replacements: Dict[str, Any] = {}
 
         # collect base class data first
         for base in bases:
-            available.update(getattr(base, '_available_', set()))
-            replacements.update(getattr(base, '_parse_replacements_', set()))
+            available.update(getattr(base, "_available_", set()))
+            replacements.update(getattr(base, "_parse_replacements_", set()))
 
         # override with local data if it exists
         for name, value in namespace.items():
-            if getattr(value, '_is_available_', False):
+            if getattr(value, "_is_available_", False):
                 available.add(name)
-            parse_replacement = getattr(value, '_parse_replacement_', None)
+            parse_replacement = getattr(value, "_parse_replacement_", None)
             if parse_replacement is not None:
                 replacements[name] = parse_replacement
 
-        cls._available_: FrozenSet[str] = frozenset(available)
+        cls._available_ = frozenset(available)
         # should this be a namedtuple so it will be immutable like _available_?
-        cls._parse_replacements_: Dict[str, Callable] = replacements
+        cls._parse_replacements_ = replacements
         return cls

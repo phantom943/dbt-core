@@ -1,11 +1,11 @@
 from dataclasses import dataclass
 from typing import Iterable, Iterator, Union, List, Tuple
 
-from dbt.contracts.graph.manifest import FilePath
+from dbt.context.context_config import ContextConfig
+from dbt.contracts.files import FilePath
 from dbt.contracts.graph.parsed import ParsedHookNode
 from dbt.exceptions import InternalException
 from dbt.node_types import NodeType, RunHookType
-from dbt.source_config import SourceConfig
 from dbt.parser.base import SimpleParser
 from dbt.parser.search import FileBlock
 from dbt.utils import get_pseudo_hook_path
@@ -24,7 +24,7 @@ class HookBlock(FileBlock):
 
     @property
     def name(self):
-        return '{}-{!s}-{!s}'.format(self.project, self.hook_type, self.index)
+        return "{}-{!s}-{!s}".format(self.project, self.hook_type, self.index)
 
 
 class HookSearcher(Iterable[HookBlock]):
@@ -33,9 +33,7 @@ class HookSearcher(Iterable[HookBlock]):
         self.source_file = source_file
         self.hook_type = hook_type
 
-    def _hook_list(
-        self, hooks: Union[str, List[str], Tuple[str, ...]]
-    ) -> List[str]:
+    def _hook_list(self, hooks: Union[str, List[str], Tuple[str, ...]]) -> List[str]:
         if isinstance(hooks, tuple):
             hooks = list(hooks)
         elif not isinstance(hooks, list):
@@ -49,8 +47,9 @@ class HookSearcher(Iterable[HookBlock]):
             hooks = self.project.on_run_end
         else:
             raise InternalException(
-                'hook_type must be one of "{}" or "{}" (got {})'
-                .format(RunHookType.Start, RunHookType.End, self.hook_type)
+                'hook_type must be one of "{}" or "{}" (got {})'.format(
+                    RunHookType.Start, RunHookType.End, self.hook_type
+                )
             )
         return self._hook_list(hooks)
 
@@ -70,16 +69,22 @@ class HookParser(SimpleParser[HookBlock, ParsedHookNode]):
     def transform(self, node):
         return node
 
-    def get_paths(self) -> List[FilePath]:
+    # Hooks are only in the dbt_project.yml file for the project
+    def get_path(self) -> FilePath:
+        # There ought to be an existing file object for this, but
+        # until that is implemented use a dummy modification time
         path = FilePath(
             project_root=self.project.project_root,
-            searched_path='.',
-            relative_path='dbt_project.yml',
+            searched_path=".",
+            relative_path="dbt_project.yml",
+            modification_time=0.0,
         )
-        return [path]
+        return path
 
     def parse_from_dict(self, dct, validate=True) -> ParsedHookNode:
-        return ParsedHookNode.from_dict(dct, validate=validate)
+        if validate:
+            ParsedHookNode.validate(dct)
+        return ParsedHookNode.from_dict(dct)
 
     @classmethod
     def get_compiled_path(cls, block: HookBlock):
@@ -89,15 +94,20 @@ class HookParser(SimpleParser[HookBlock, ParsedHookNode]):
         self,
         block: HookBlock,
         path: str,
-        config: SourceConfig,
+        config: ContextConfig,
+        fqn: List[str],
         name=None,
         **kwargs,
     ) -> ParsedHookNode:
 
         return super()._create_parsetime_node(
-            block=block, path=path, config=config,
-            index=block.index, name=name,
-            tags=[str(block.hook_type)]
+            block=block,
+            path=path,
+            config=config,
+            fqn=fqn,
+            index=block.index,
+            name=name,
+            tags=[str(block.hook_type)],
         )
 
     @property
