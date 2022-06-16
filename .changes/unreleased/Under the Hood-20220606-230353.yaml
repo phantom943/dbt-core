@@ -1,5 +1,5 @@
 kind: Under the Hood
-body: Update context readme + clean up context code"
+body: Move string interpolation of "secret" env vars outside of Jinja context
 time: 2022-06-06T23:03:53.022568+02:00
 custom:
   Author: jtcohen6
